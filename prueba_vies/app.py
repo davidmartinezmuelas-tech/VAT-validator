@@ -96,21 +96,47 @@ class Tooltip:
 
 
 class UIThreadCallbacks(ValidationCallbacks):
-    """Schedules core callback notifications onto Tk main thread."""
+    """Marshals core worker callbacks to Tkinter main thread (thread-safe).
+    
+    Workers (from ValidationScheduler) run in separate threads and emit callbacks.
+    All UI updates must happen in Tkinter's main thread only.
+    This adapter uses root.after(0, callback) to schedule updates.
+    
+    Ensures that updates to tables, logs, progress, and banners are synchronized
+    with Tkinter's event loop, preventing race conditions and crashes.
+    """
 
     def __init__(self, app: "VATValidatorApp"):
         self.app = app
 
     def on_vat_updated(self, key: CountryNumber, vat_info: VatInfo, result: dict) -> None:
+        """Notify UI that a VAT has been processed.
+        
+        Called by workers when VAT validation completes (success or failure).
+        Updates table cells, moves VAT between tabs (pending → validated), logs result.
+        """
         self.app.root.after(0, lambda: self.app._on_vat_updated_main_thread(key, vat_info, result))
 
     def on_progress(self, done: int, total: int) -> None:
+        """Notify UI of validation progress.
+        
+        Called periodically by workers. Updates progress bar, status line (e.g., "3/10 completados").
+        """
         self.app.root.after(0, lambda: self.app._on_progress_main_thread(done, total))
 
     def on_banner_update(self, text: str, next_retry_seconds: Optional[int] = None) -> None:
+        """Update banner with status message and optional next retry countdown.
+        
+        Called by workers to show state (e.g., "Validando...", "Siguiente reintento en 5s").
+        """
         self.app.root.after(0, lambda: self.app._on_banner_update_main_thread(text, next_retry_seconds))
 
     def on_batch_finished(self, summary: BatchSummary) -> None:
+        """Notify UI that entire validation batch has completed.
+        
+        Called when all VATs reach terminal state or user stops validation.
+        Updates banner with final summary (total, valid, invalid, pending counts).
+        """
         self.app.root.after(0, lambda: self.app._on_batch_finished_main_thread(summary))
 
 

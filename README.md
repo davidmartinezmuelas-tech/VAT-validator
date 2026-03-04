@@ -87,6 +87,73 @@ Dataclasses y utilidades:
 - Funciones de parsing, normalización, helpers
 
 
+## Flujo de Validación
+
+### 1. Carga de Excel (Usuario)
+```
+Usuario pulsa "Cargar Excel"
+  → Selecciona archivo .xlsx
+  → App detecta columna VAT/NIF automáticamente
+  → Parsea cada VAT (normaliza, extrae país + número)
+  → Crea VatInfo con estado VALIDATING
+  → Muestra VATs en tabla "Pendientes"
+```
+
+### 2. Validación (Automática al Cargar)
+```
+App inicia scheduler con items
+  → Crea 3 workers concurrentes
+  → Tabula VATs en cola de prioridad
+  → Workers procesan VAT por VAT:
+```
+
+### 3. Procesamiento de Cada VAT
+```
+Worker obtiene VAT de la cola
+  ├─ Respeta throttle global (250ms desde último request)
+  ├─ Respeta cooldown por país (si estaba limitado)
+  └─ Llama ViesValidator.validate_vat(country, number)
+       ├─ VIES responde VALID → Guarda nombre/dirección
+       ├─ VIES responde INVALID
+       ├─ VIES limita (MS_MAX_CONCURRENT_REQ) → Status THROTTLED, cooldown por país
+       ├─ VIES timeout → Status TIMEOUT
+       └─ Error genérico → Status ERROR
+
+Si estado retryable (THROTTLED, TIMEOUT, ERROR):
+  ├─ auto_retry_count < 2 y deadline (25s) no alcanzado
+  └─ Reinserta en cola con next_retry_at = now + backoff
+  
+Si auto_retry_count ≥ 2 o deadline alcanzado:
+  └─ Status PENDING_MAX (requiere acción manual)
+```
+
+### 4. Actualización de UI (Thread-Safe)
+```
+Worker emite callback: on_vat_updated(key, vat_info, result)
+  → UIThreadCallbacks marshalling via root.after(0, ...)
+  → Ejecución en thread principal Tkinter
+  → Actualiza tabla:
+      ├─ Si VALID/INVALID: mueve a pestaña "Validados"
+      └─ Si aún PENDING: permanece en "Pendientes"
+  → Actualiza logs con resultado (OK/WARN/ERROR)
+```
+
+### 5. Resumen y Finalización
+```
+Cuando todos VATs alcanzan estado terminal:
+  → Scheduler emite BatchSummary(done, total, valid, invalid, pending)
+  → UI actualiza banner con resumen final
+  
+Usuario puede:
+  ├─ Exportar a Excel (status_code() → strings: VALID, INVALID, THROTTLED, etc.)
+  ├─ Reintentar pendientes "listos" (que cumplieron next_retry_at)
+  ├─ Abrir VIES manualmente para VATs limitados/fallidos
+  └─ Salir (con confirmación)
+```
+
+---
+
+
 ## Ejecutar
 
 ```bash

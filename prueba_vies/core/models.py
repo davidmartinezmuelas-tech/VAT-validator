@@ -75,7 +75,16 @@ MANUAL_ONLY_STATES = {VatStatus.PENDING_MAX, VatStatus.INVALID_FORMAT}
 # Helper functions
 
 def normalize_vat(vat) -> Optional[str]:
-    """Normalize VAT number: remove spaces, non-alphanumeric, uppercase."""
+    """Normalize VAT number: remove spaces, non-alphanumeric, uppercase.
+    
+    Removes non-breaking spaces, converts to uppercase, keeps only letters and digits.
+    
+    Args:
+        vat: Raw VAT string from Excel or user input
+        
+    Returns:
+        Normalized string (e.g., 'ES12345678A') or None if empty
+    """
     if vat is None:
         return None
     vat_str = str(vat).replace("\u00A0", "")
@@ -86,9 +95,19 @@ def normalize_vat(vat) -> Optional[str]:
 def parse_vat(vat) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Parse VAT into (country, number, vat_clean).
     
+    Expects VAT format: 2-letter country code + number (e.g., 'ES12345678A').
+    Returns a tuple suitable for VIES checkVat() SOAP call.
+    
+    Args:
+        vat: Raw VAT string
+        
     Returns:
         Tuple of (country_code, vat_number, full_vat_clean)
-        If invalid format, returns (None, None, vat_clean)
+        If format invalid (not 2 letters at start), returns (None, None, vat_clean)
+        
+    Examples:
+        parse_vat('ES12345678')  →  ('ES', '12345678', 'ES12345678')
+        parse_vat('INVALID')      →  (None, None, 'INVALID')
     """
     normalized = normalize_vat(vat)
     if not normalized or len(normalized) < 3:
@@ -99,7 +118,18 @@ def parse_vat(vat) -> Tuple[Optional[str], Optional[str], Optional[str]]:
 
 
 def get_vat_number_only(vat_clean: str) -> str:
-    """Get VAT number without country prefix."""
+    """Extract VAT number without country prefix (for VIES "Abrir VIES" button).
+    
+    Used when user clicks 'Abrir VIES' to copy the number-only part to clipboard
+    and open the VIES website (user then manually selects country).
+    
+    Args:
+        vat_clean: Normalized VAT (e.g., 'ES12345678')
+        
+    Returns:
+        Number-only part (e.g., '12345678')
+        If not in format CCNNNN, returns entire normalized string
+    """
     vat_clean = re.sub(r"[^A-Z0-9]", "", (vat_clean or "").upper())
     if re.match(r"^[A-Z]{2}", vat_clean):
         return vat_clean[2:]
@@ -107,7 +137,17 @@ def get_vat_number_only(vat_clean: str) -> str:
 
 
 def status_label(status: VatStatus) -> str:
-    """Convert VatStatus to human-readable label for UI (sin cambios de textos)."""
+    """Convert VatStatus enum to human-readable label for UI display.
+    
+    Each status gets a visual indicator (emoji) and Spanish description.
+    Used in table cells, logs, and banner messages.
+    
+    Args:
+        status: VatStatus enum value
+        
+    Returns:
+        Formatted string (e.g., '✓ Válido', '⏳ Pendiente', '⛔ Limitado por VIES')
+    """
     mapping = {
         VatStatus.VALID: "✓ Válido",
         VatStatus.INVALID: "✕ Inválido",
@@ -123,7 +163,17 @@ def status_label(status: VatStatus) -> str:
 
 
 def status_code(status: VatStatus) -> str:
-    """Get canonical status code string for exports/logs."""
+    """Get canonical status code for Excel exports and structured logging.
+    
+    Returns the Enum value as string (e.g., 'VALID', 'INVALID', 'THROTTLED').
+    This is what gets written to Excel output.
+    
+    Args:
+        status: VatStatus enum
+        
+    Returns:
+        String code (e.g., 'VALID', 'THROTTLED', 'PENDING_MAX')
+    """
     return status.value
 
 
