@@ -34,13 +34,15 @@ from zeep import Client
 from zeep.exceptions import Fault, TransportError
 from zeep.transports import Transport
 
+from ui_styles import UIStyles
+
 
 CountryNumber = Tuple[str, str]  # (country, number)
 
 
 class Tooltip:
     """Simple tooltip helper for ttk widgets."""
-    def __init__(self, widget, text: str, delay_ms: int = 400):
+    def __init__(self, widget, text: str, delay_ms: int = UIStyles.TOOLTIP_DELAY_MS):
         self.widget = widget
         self.text = text
         self.delay_ms = delay_ms
@@ -78,9 +80,9 @@ class Tooltip:
         tw.wm_geometry(f"+{x}+{y}")
         tw.attributes("-topmost", True)
         
-        label = tk.Label(tw, text=self.text, background="#fff9e6", foreground="#333",
-                         relief="solid", borderwidth=1, font=("Segoe UI", 8),
-                         padx=8, pady=4, wraplength=250)
+        label = tk.Label(tw, text=self.text, background=UIStyles.TOOLTIP_BG, foreground=UIStyles.TOOLTIP_FG,
+                         relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.TOOLTIP_BORDERWIDTH, font=UIStyles.FONT_XSMALL,
+                         padx=UIStyles.TOOLTIP_PADX, pady=UIStyles.TOOLTIP_PADY, wraplength=UIStyles.TOOLTIP_WRAPLENGTH)
         label.pack()
     
     def hidetip(self):
@@ -135,8 +137,8 @@ class VATValidatorApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("VIES VAT Validator")
-        self.root.geometry("1250x760")
-        self.root.minsize(1100, 650)
+        self.root.geometry(f"{UIStyles.WINDOW_WIDTH}x{UIStyles.WINDOW_HEIGHT}")
+        self.root.minsize(UIStyles.WINDOW_MIN_WIDTH, UIStyles.WINDOW_MIN_HEIGHT)
 
         self.selected_file: Optional[Path] = None
         self.processing = False
@@ -188,25 +190,13 @@ class VATValidatorApp:
     def apply_theme(self) -> None:
         style = ttk.Style()
         
-        # Slango colors: soft blue background + white cards
-        self.BG_MAIN = "#E8F0FE"  # soft blue background
-        self.HEADER_BG = "#0b3a78"  # navy blue header
-        self.CARD_BG = "#FFFFFF"  # white cards
-        self.CARD_BORDER = "#E6E8EF"  # subtle border
-        
-        self.root.configure(bg=self.BG_MAIN)
+        self.root.configure(bg=UIStyles.BG_MAIN)
         
         # Typography
-        style.configure("Treeview", rowheight=28, background=self.CARD_BG, fieldbackground=self.CARD_BG, foreground="#1f2937")
-        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"), background="#f0f2f5", foreground="#1f2937")
-        style.configure("TNotebook", background=self.CARD_BG)
-        style.configure("TNotebook.Tab", padding=(14, 8))
-        
-        # Zebra striping: very soft tones
-        self.TREE_ROW_EVEN = "#fafbfc"
-        self.TREE_ROW_ODD = "#ffffff"
-        self.LOG_BG = "#fafbfc"
-        self.LOG_FG = "#1f2937"
+        style.configure("Treeview", rowheight=UIStyles.TREEVIEW_ROWHEIGHT, background=UIStyles.CARD_BG, fieldbackground=UIStyles.CARD_BG, foreground=UIStyles.TREEVIEW_HEADING_FG)
+        style.configure("Treeview.Heading", font=UIStyles.FONT_HEADING, background=UIStyles.TREEVIEW_HEADING_BG, foreground=UIStyles.TREEVIEW_HEADING_FG)
+        style.configure("TNotebook", background=UIStyles.CARD_BG)
+        style.configure("TNotebook.Tab", padding=(UIStyles.NOTEBOOK_TAB_PADDING_X, UIStyles.NOTEBOOK_TAB_PADDING_Y))
 
     def setup_ui(self) -> None:
         # Root grid
@@ -215,36 +205,36 @@ class VATValidatorApp:
         self.root.rowconfigure(1, weight=0)
 
         # Main container (soft blue background)
-        main = tk.Frame(self.root, bg=self.BG_MAIN)
-        main.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        main = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
+        main.grid(row=0, column=0, sticky="nsew", padx=UIStyles.MAIN_PADDING, pady=UIStyles.MAIN_PADDING)
         main.columnconfigure(0, weight=1)
         main.rowconfigure(2, weight=1)  # content
         main.rowconfigure(3, weight=0)  # log
 
         # Header (navy blue background, white text)
-        header = tk.Frame(main, bg=self.HEADER_BG)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 12), padx=0)
+        header = tk.Frame(main, bg=UIStyles.HEADER_BG)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, UIStyles.CONTENT_PADDING_Y), padx=0)
         header.columnconfigure(0, weight=1)
 
-        title = tk.Label(header, text="VIES VAT Validator", font=("Segoe UI", 22, "bold"), bg=self.HEADER_BG, fg="#ffffff")
-        title.grid(row=0, column=0, sticky="w", padx=16, pady=(12, 0))
-        subtitle = tk.Label(header, text="Validación masiva de números VAT europeos", font=("Segoe UI", 10), bg=self.HEADER_BG, fg="#c7d2fe")
-        subtitle.grid(row=1, column=0, sticky="w", padx=16, pady=(2, 12))
+        title = tk.Label(header, text="VIES VAT Validator", font=UIStyles.FONT_TITLE, bg=UIStyles.HEADER_BG, fg=UIStyles.TEXT_HEADER)
+        title.grid(row=0, column=0, sticky="w", padx=UIStyles.CONTENT_PADDING_X, pady=(UIStyles.BUTTON_PADY, 0))
+        subtitle = tk.Label(header, text="Validación masiva de números VAT europeos", font=UIStyles.FONT_SUBTITLE, bg=UIStyles.HEADER_BG, fg=UIStyles.TEXT_SUBTITLE)
+        subtitle.grid(row=1, column=0, sticky="w", padx=UIStyles.CONTENT_PADDING_X, pady=(2, UIStyles.BUTTON_PADY))
 
         # Toolbar (simplified)
-        toolbar = tk.Frame(main, bg=self.BG_MAIN)
-        toolbar.grid(row=1, column=0, sticky="ew", pady=(12, 8), padx=16)
+        toolbar = tk.Frame(main, bg=UIStyles.BG_MAIN)
+        toolbar.grid(row=1, column=0, sticky="ew", pady=(UIStyles.BUTTON_PADY, UIStyles.CARD_PADDING_Y), padx=UIStyles.CONTENT_PADDING_X)
         toolbar.columnconfigure(4, weight=1)
 
-        self.load_btn = ttk.Button(toolbar, text="Cargar Excel", bootstyle="primary", padding=(14, 8), command=self.load_excel)
-        self.load_btn.grid(row=0, column=0, padx=(0, 8))
+        self.load_btn = ttk.Button(toolbar, text="Cargar Excel", bootstyle="primary", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.load_excel)
+        self.load_btn.grid(row=0, column=0, padx=(0, UIStyles.CARD_PADDING_Y))
 
-        self.validate_btn = ttk.Button(toolbar, text="Validar", bootstyle="primary", padding=(14, 8), command=self.start_validation)
-        self.validate_btn.grid(row=0, column=1, padx=(0, 8))
+        self.validate_btn = ttk.Button(toolbar, text="Validar", bootstyle="primary", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.start_validation)
+        self.validate_btn.grid(row=0, column=1, padx=(0, UIStyles.CARD_PADDING_Y))
         self.validate_btn.state(["disabled"])
 
-        self.retry_btn = ttk.Button(toolbar, text="Reintentar", bootstyle="primary", padding=(14, 8), command=self.retry_pending)
-        self.retry_btn.grid(row=0, column=2, padx=(0, 8))
+        self.retry_btn = ttk.Button(toolbar, text="Reintentar", bootstyle="primary", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.retry_pending)
+        self.retry_btn.grid(row=0, column=2, padx=(0, UIStyles.CARD_PADDING_Y))
         self.retry_btn.state(["disabled"])
         Tooltip(self.retry_btn, "Reintenta los pendientes que ya han cumplido el tiempo de espera.")
 
@@ -269,52 +259,51 @@ class VATValidatorApp:
         self.export_menu_btn["menu"] = self.export_menu
 
         # Content area
-        content = tk.Frame(main, bg=self.BG_MAIN)
+        content = tk.Frame(main, bg=UIStyles.BG_MAIN)
         content.grid(row=2, column=0, sticky="nsew")
         content.columnconfigure(0, weight=1)
         content.rowconfigure(0, weight=1)
 
         # Results card (white frame, no Labelframe)
-        results_card = tk.Frame(content, bg=self.CARD_BG, relief="solid", borderwidth=1, highlightbackground=self.CARD_BORDER, highlightthickness=1)
+        results_card = tk.Frame(content, bg=UIStyles.CARD_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.CARD_BORDERWIDTH, highlightbackground=UIStyles.CARD_BORDER, highlightthickness=1)
         results_card.grid(row=0, column=0, sticky="nsew", pady=(0, 12), padx=16)
         results_card.columnconfigure(0, weight=1)
         results_card.rowconfigure(2, weight=1)
         
         # Title label on white background
-        tk.Label(results_card, text="Resultados", font=("Segoe UI", 12, "bold"), bg=self.CARD_BG, fg="#1f2937", anchor="w", padx=12, pady=8).grid(row=0, column=0, sticky="ew")
+        tk.Label(results_card, text="Resultados", font=UIStyles.FONT_LABEL, bg=UIStyles.CARD_BG, fg=UIStyles.TEXT_PRIMARY, anchor="w", padx=UIStyles.CARD_PADDING_X, pady=UIStyles.CARD_PADDING_Y).grid(row=0, column=0, sticky="ew")
 
         # Banner for pending VATs (will be shown/hidden dynamically)
-        # Banner for pending VATs (Slango colors: cyan + blue)
-        self.banner_frame = tk.Frame(results_card, bg="#E6F6F8", relief="solid", borderwidth=1, highlightbackground="#2FB5C4", highlightthickness=1)
-        self.banner_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
+        self.banner_frame = tk.Frame(results_card, bg=UIStyles.BANNER_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.BANNER_BORDERWIDTH, highlightbackground=UIStyles.BANNER_BORDER, highlightthickness=1)
+        self.banner_frame.grid(row=1, column=0, sticky="ew", padx=UIStyles.CARD_PADDING_Y, pady=UIStyles.CARD_PADDING_Y)
         self.banner_frame.columnconfigure(0, weight=1)
         self.banner_frame.grid_remove()  # Hidden by default
         
         # Banner content
-        banner_content = tk.Frame(self.banner_frame, bg="#E6F6F8")
-        banner_content.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
+        banner_content = tk.Frame(self.banner_frame, bg=UIStyles.BANNER_BG)
+        banner_content.grid(row=0, column=0, sticky="ew", padx=UIStyles.BANNER_PADDING_X, pady=UIStyles.BANNER_PADDING_Y)
         banner_content.columnconfigure(0, weight=1)
         
-        self.banner_label = tk.Label(banner_content, text="", font=("Segoe UI", 9), bg="#E6F6F8", fg="#0F3A6D")
+        self.banner_label = tk.Label(banner_content, text="", font=UIStyles.FONT_SMALL, bg=UIStyles.BANNER_BG, fg=UIStyles.BANNER_FG)
         self.banner_label.grid(row=0, column=0, sticky="w")
         
-        banner_btn_frame = tk.Frame(banner_content, bg="#E6F6F8")
-        banner_btn_frame.grid(row=0, column=1, sticky="e", padx=(12, 0))
+        banner_btn_frame = tk.Frame(banner_content, bg=UIStyles.BANNER_BG)
+        banner_btn_frame.grid(row=0, column=1, sticky="e", padx=(UIStyles.BANNER_PADDING_X, 0))
         
         # Custom styled buttons for banner
-        self.banner_go_pending_btn = tk.Button(banner_btn_frame, text="Ir a Pendientes", bg="#2FB5C4", fg="white", font=("Segoe UI", 9, "bold"), relief="solid", borderwidth=0, padx=10, pady=4, cursor="hand2", command=self._go_to_pending_tab, activebackground="#239EAC", activeforeground="white")
-        self.banner_go_pending_btn.grid(row=0, column=0, padx=(0, 6))
+        self.banner_go_pending_btn = tk.Button(banner_btn_frame, text="Ir a Pendientes", bg=UIStyles.BANNER_BTN_BG, fg=UIStyles.BANNER_BTN_FG, font=UIStyles.FONT_SMALL, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.BUTTON_BORDERWIDTH, padx=UIStyles.BUTTON_SMALL_PADX, pady=UIStyles.BUTTON_SMALL_PADY, cursor="hand2", command=self._go_to_pending_tab, activebackground=UIStyles.BANNER_BTN_ACTIVE_BG, activeforeground=UIStyles.BANNER_BTN_ACTIVE_FG)
+        self.banner_go_pending_btn.grid(row=0, column=0, padx=(0, UIStyles.BUTTON_SMALL_PADX))
         
-        self.banner_retry_btn = tk.Button(banner_btn_frame, text="Reintentar ahora", bg="#2FB5C4", fg="white", font=("Segoe UI", 9, "bold"), relief="solid", borderwidth=0, padx=10, pady=4, cursor="hand2", command=self.retry_pending, activebackground="#239EAC", activeforeground="white")
+        self.banner_retry_btn = tk.Button(banner_btn_frame, text="Reintentar ahora", bg=UIStyles.BANNER_BTN_BG, fg=UIStyles.BANNER_BTN_FG, font=UIStyles.FONT_SMALL, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.BUTTON_BORDERWIDTH, padx=UIStyles.BUTTON_SMALL_PADX, pady=UIStyles.BUTTON_SMALL_PADY, cursor="hand2", command=self.retry_pending, activebackground=UIStyles.BANNER_BTN_ACTIVE_BG, activeforeground=UIStyles.BANNER_BTN_ACTIVE_FG)
         self.banner_retry_btn.grid(row=0, column=1)
         Tooltip(self.banner_retry_btn, "Reintenta los VAT que estén listos en este momento.")
 
         self.notebook = ttk.Notebook(results_card)
-        self.notebook.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self.notebook.grid(row=2, column=0, sticky="nsew", padx=UIStyles.CARD_PADDING_X, pady=(0, UIStyles.CONTENT_PADDING_Y))
 
         # Tabs
-        self.pending_tab = ttk.Frame(self.notebook, padding=(10, 10))
-        self.validated_tab = ttk.Frame(self.notebook, padding=(10, 10))
+        self.pending_tab = ttk.Frame(self.notebook, padding=(UIStyles.TREE_PADDING, UIStyles.TREE_PADDING))
+        self.validated_tab = ttk.Frame(self.notebook, padding=(UIStyles.TREE_PADDING, UIStyles.TREE_PADDING))
         self.notebook.add(self.pending_tab, text="Pendientes")
         self.notebook.add(self.validated_tab, text="Validados")
 
@@ -322,20 +311,20 @@ class VATValidatorApp:
         self._build_tab(self.validated_tab, kind="validated")
 
         # Log card (white frame, no Labelframe)
-        log_card = tk.Frame(main, bg=self.CARD_BG, relief="solid", borderwidth=1, highlightbackground=self.CARD_BORDER, highlightthickness=1)
+        log_card = tk.Frame(main, bg=UIStyles.CARD_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.CARD_BORDERWIDTH, highlightbackground=UIStyles.CARD_BORDER, highlightthickness=1)
         log_card.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 12))
         log_card.columnconfigure(0, weight=1)
         log_card.rowconfigure(1, weight=1)
 
         # Header with title and controls
-        header_row = tk.Frame(log_card, bg=self.CARD_BG)
+        header_row = tk.Frame(log_card, bg=UIStyles.CARD_BG)
         header_row.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
         header_row.columnconfigure(0, weight=1)
         
-        tk.Label(header_row, text="Registro de actividad", font=("Segoe UI", 12, "bold"), bg=self.CARD_BG, fg="#1f2937", anchor="w").grid(row=0, column=0, sticky="w")
+        tk.Label(header_row, text="Registro de actividad", font=UIStyles.FONT_LABEL, bg=UIStyles.CARD_BG, fg=UIStyles.TEXT_PRIMARY, anchor="w").grid(row=0, column=0, sticky="w")
 
         # Controls right
-        controls = tk.Frame(header_row, bg=self.CARD_BG)
+        controls = tk.Frame(header_row, bg=UIStyles.CARD_BG)
         controls.grid(row=0, column=1, sticky="e")
 
         self.autoscroll_chk = ttk.Checkbutton(controls, text="Auto-scroll", variable=self.log_autoscroll_var, bootstyle="round-toggle")
@@ -345,21 +334,21 @@ class VATValidatorApp:
         ttk.Button(controls, text="Copiar", bootstyle="secondary-outline", command=self.copy_log).grid(row=0, column=2)
 
         # Text + scrollbar (reduced height)
-        text_frame = tk.Frame(log_card, bg=self.CARD_BG)
+        text_frame = tk.Frame(log_card, bg=UIStyles.CARD_BG)
         text_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
         text_frame.columnconfigure(0, weight=1)
 
         self.log_text = tk.Text(
             text_frame,
-            height=5,
+            height=UIStyles.LOG_HEIGHT,
             wrap=tk.WORD,
-            font=("Consolas", 9),
-            bg=self.LOG_BG,
-            fg=self.LOG_FG,
-            insertbackground=self.LOG_FG,
+            font=UIStyles.FONT_MONOSPACE,
+            bg=UIStyles.LOG_BG,
+            fg=UIStyles.LOG_FG,
+            insertbackground=UIStyles.LOG_FG,
             relief="flat",
             highlightthickness=1,
-            highlightbackground="#e6e8ef",
+            highlightbackground=UIStyles.CARD_BORDER,
             highlightcolor="#b6c2cf",
         )
         self.log_text.grid(row=0, column=0, sticky="ew")
@@ -370,25 +359,25 @@ class VATValidatorApp:
         self.log_text.configure(state=tk.DISABLED)
 
         # Tags
-        self.log_text.tag_configure("OK", foreground="#10b981")
-        self.log_text.tag_configure("WARN", foreground="#f59e0b")
-        self.log_text.tag_configure("ERROR", foreground="#ef4444")
-        self.log_text.tag_configure("INFO", foreground="#1f2937")
-        self.log_text.tag_configure("DEBUG", foreground="#6b7280")
+        self.log_text.tag_configure("OK", foreground=UIStyles.LOG_OK)
+        self.log_text.tag_configure("WARN", foreground=UIStyles.LOG_WARN)
+        self.log_text.tag_configure("ERROR", foreground=UIStyles.LOG_ERROR)
+        self.log_text.tag_configure("INFO", foreground=UIStyles.LOG_INFO)
+        self.log_text.tag_configure("DEBUG", foreground=UIStyles.LOG_DEBUG)
 
         # Auto-scroll inteligente: si el usuario sube, lo apagamos
         self._install_log_scroll_detection(log_scroll)
 
         # Footer (status + exit)
-        footer = tk.Frame(self.root, bg=self.BG_MAIN)
-        footer.grid(row=1, column=0, sticky="ew", padx=20, pady=10)
+        footer = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
+        footer.grid(row=1, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=UIStyles.BUTTON_PADY)
         footer.columnconfigure(0, weight=1)
 
-        self.status_label = tk.Label(footer, textvariable=self.status_var, anchor="w", bg=self.BG_MAIN, fg="#1f2937", font=("Segoe UI", 9), padx=8)
+        self.status_label = tk.Label(footer, textvariable=self.status_var, anchor="w", bg=UIStyles.BG_MAIN, fg=UIStyles.TEXT_PRIMARY, font=UIStyles.FONT_STATUS, padx=UIStyles.CARD_PADDING_X)
         self.status_label.grid(row=0, column=0, sticky="ew")
 
         self.exit_btn = ttk.Button(footer, text="Salir", bootstyle="danger-outline", width=12, command=self.exit_app)
-        self.exit_btn.grid(row=0, column=1, sticky="e", padx=(10, 0), pady=(6, 4))
+        self.exit_btn.grid(row=0, column=1, sticky="e", padx=(UIStyles.BUTTON_PADY, 0), pady=(UIStyles.BUTTON_SMALL_PADY, UIStyles.CARD_PADDING_Y))
 
     def _build_tab(self, parent: ttk.Frame, kind: str) -> None:
         parent.columnconfigure(0, weight=1)
@@ -422,7 +411,7 @@ class VATValidatorApp:
         else:
             cols = ("VAT", "País", "Número", "Nombre", "Estado", "Última verificación")
 
-        tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=12)
+        tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=UIStyles.TREEVIEW_HEIGHT)
         tree.grid(row=0, column=0, sticky="nsew")
 
         # Configure headings and columns
@@ -431,20 +420,20 @@ class VATValidatorApp:
             tree.column(c, width=120, anchor="w")
 
         # Adjust column widths
-        tree.column("VAT", width=140)
-        tree.column("País", width=60, anchor="center")
-        tree.column("Número", width=120)
-        tree.column("Nombre", width=220)
-        tree.column("Estado", width=140)
+        tree.column("VAT", width=UIStyles.COL_VAT)
+        tree.column("País", width=UIStyles.COL_COUNTRY, anchor="center")
+        tree.column("Número", width=UIStyles.COL_NUMBER)
+        tree.column("Nombre", width=UIStyles.COL_NAME)
+        tree.column("Estado", width=UIStyles.COL_STATUS)
         
         if kind == "pending":
-            tree.column("Intentos", width=80, anchor="center")
-            tree.column("Última verificación", width=150)
-            tree.column("Siguiente intento", width=130)
-            tree.column("Error", width=210)
-            tree.column("Acción", width=120, anchor="center")
+            tree.column("Intentos", width=UIStyles.COL_ATTEMPTS, anchor="center")
+            tree.column("Última verificación", width=UIStyles.COL_LAST_CHECK)
+            tree.column("Siguiente intento", width=UIStyles.COL_NEXT_RETRY)
+            tree.column("Error", width=UIStyles.COL_ERROR)
+            tree.column("Acción", width=UIStyles.COL_ACTION, anchor="center")
         else:
-            tree.column("Última verificación", width=150)
+            tree.column("Última verificación", width=UIStyles.COL_LAST_CHECK)
 
         yscroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview, bootstyle="round")
         yscroll.grid(row=0, column=1, sticky="ns")
@@ -455,18 +444,18 @@ class VATValidatorApp:
         tree.configure(xscrollcommand=xscroll.set)
 
         # Zebra striping
-        tree.tag_configure("row_even", background=self.TREE_ROW_EVEN)
-        tree.tag_configure("row_odd", background=self.TREE_ROW_ODD)
+        tree.tag_configure("row_even", background=UIStyles.TREE_ROW_EVEN)
+        tree.tag_configure("row_odd", background=UIStyles.TREE_ROW_ODD)
 
         # Row tags (colors)
-        tree.tag_configure("VALID", foreground="#0f766e")
-        tree.tag_configure("INVALID", foreground="#b91c1c")
-        tree.tag_configure("PENDING", foreground="#b45309")
-        tree.tag_configure("THROTTLED", foreground="#b45309")
-        tree.tag_configure("TIMEOUT", foreground="#b45309")
-        tree.tag_configure("ERROR", foreground="#b45309")
-        tree.tag_configure("PENDING_MAX", foreground="#64748b")
-        tree.tag_configure("INVALID_FORMAT", foreground="#64748b")
+        tree.tag_configure("VALID", foreground=UIStyles.STATUS_VALID)
+        tree.tag_configure("INVALID", foreground=UIStyles.STATUS_INVALID)
+        tree.tag_configure("PENDING", foreground=UIStyles.STATUS_PENDING)
+        tree.tag_configure("THROTTLED", foreground=UIStyles.STATUS_THROTTLED)
+        tree.tag_configure("TIMEOUT", foreground=UIStyles.STATUS_TIMEOUT)
+        tree.tag_configure("ERROR", foreground=UIStyles.STATUS_ERROR)
+        tree.tag_configure("PENDING_MAX", foreground=UIStyles.STATUS_PENDING_MAX)
+        tree.tag_configure("INVALID_FORMAT", foreground=UIStyles.STATUS_INVALID_FORMAT)
 
         # Bindings
         tree.bind("<<TreeviewSelect>>", self.on_tree_select)
