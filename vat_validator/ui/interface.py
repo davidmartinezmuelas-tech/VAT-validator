@@ -1,14 +1,12 @@
-"""VIES VAT Validator (Slango-style)
+"""Interfaz gráfica de usuario para VIES VAT Validator.
 
-Aplicación de escritorio para validar números VAT (VIES) a partir de un Excel.
-- Carga Excel, detecta columna VAT/NIF automáticamente.
-- Separa resultados en pestañas: Pendientes / Validados.
-- Maneja limitaciones del servicio (THROTTLED / TIMEOUT) sin bucles infinitos.
-- Acción rápida "Abrir VIES": copia el número sin prefijo y abre la web.
-
-Notas:
-- VIES es un servicio externo y puede limitar automatizaciones.
-- Este programa intenta ser rápido y amable: batches finitos + reintentos manuales.
+Aplicación Tkinter para validación masiva de números VAT contra el servicio VIES.
+Proporciona:
+- Carga de archivos Excel con detección automática de columnas
+- Validación concurrente con interfaz responsiva
+- Exportación de resultados
+- Reintentos manuales y automáticos
+- Logs en tiempo real y visualización de resultados
 """
 
 from __future__ import annotations
@@ -25,10 +23,7 @@ from tkinter import filedialog, messagebox
 
 import ttkbootstrap as ttk
 
-from openpyxl import load_workbook, Workbook
-
-from ui_styles import UIStyles
-from core.models import (
+from vat_validator.models import (
     VatInfo,
     VatStatus,
     CountryNumber,
@@ -39,9 +34,11 @@ from core.models import (
     status_label,
     status_code,
 )
-from core.validator import ViesValidator
-from core.scheduler import ValidationScheduler
-from core.callbacks import ValidationCallbacks, BatchSummary
+from vat_validator.vies_client import ViesValidator
+from vat_validator.retry_logic import RetryScheduler
+from vat_validator.callbacks import ValidationCallbacks, BatchSummary
+from vat_validator.excel_handler import load_excel, save_excel
+from .styles import UIStyles
 
 
 class Tooltip:
@@ -98,7 +95,7 @@ class Tooltip:
 class UIThreadCallbacks(ValidationCallbacks):
     """Marshalling de callbacks de workers del core al thread principal de Tkinter (thread-safe).
     
-    Los workers (desde ValidationScheduler) se ejecutan en threads separados y emiten callbacks.
+    Los workers (desde RetryScheduler) se ejecutan en threads separados y emiten callbacks.
     Todas las actualizaciones de UI deben ocurrir solo en el thread principal de Tkinter.
     Este adaptador usa root.after(0, callback) para programar actualizaciones.
     
@@ -110,37 +107,29 @@ class UIThreadCallbacks(ValidationCallbacks):
         self.app = app
 
     def on_vat_updated(self, key: CountryNumber, vat_info: VatInfo, result: dict) -> None:
-        """Notifica a UI que un VAT ha sido procesado.
-        
-        Llamado por workers cuando la validación VAT se completa (éxito o falla).
-        Actualiza celdas de tabla, mueve VAT entre pestañas (pendientes → validados), registra resultado.
-        """
+        """Notifica a UI que un VAT ha sido procesado."""
         self.app.root.after(0, lambda: self.app._on_vat_updated_main_thread(key, vat_info, result))
 
     def on_progress(self, done: int, total: int) -> None:
-        """Notifica a UI del progreso de validación.
-        
-        Llamado periódicamente por workers. Actualiza barra de progreso, línea de estado (ej: "3/10 completados").
-        """
+        """Notifica a UI del progreso de validación."""
         self.app.root.after(0, lambda: self.app._on_progress_main_thread(done, total))
 
     def on_banner_update(self, text: str, next_retry_seconds: Optional[int] = None) -> None:
-        """Actualiza banner con mensaje de estado y cuenta regresiva opcional de próximo reintento.
-        
-        Llamado por workers para mostrar estado (ej: "Validando...", "Siguiente reintento en 5s").
-        """
+        """Actualiza banner con mensaje de estado y cuenta regresiva opcional."""
         self.app.root.after(0, lambda: self.app._on_banner_update_main_thread(text, next_retry_seconds))
 
     def on_batch_finished(self, summary: BatchSummary) -> None:
-        """Notifica a UI que lote de validación completo ha terminado.
-        
-        Llamado cuando todos los VATs alcanzan estado terminal o usuario detiene validación.
-        Actualiza banner con resumen final (conteos total, válido, inválido, pendiente).
-        """
+        """Notifica a UI que lote de validación completo ha terminado."""
         self.app.root.after(0, lambda: self.app._on_batch_finished_main_thread(summary))
 
 
 class VATValidatorApp:
+    """Aplicación principal de validación de VAT con interfaz Tkinter.
+    
+    Orquesta carga de Excel, validación concurrente, visualización de resultados
+    y exportación. Mantiene estado de UI sincronizado con datos de validación.
+    """
+    
     # Estados from core
     PENDING_STATES = PENDING_STATES
     VALIDATED_STATES = VALIDATED_STATES
@@ -176,7 +165,7 @@ class VATValidatorApp:
         self.validated_tree_iids: Dict[CountryNumber, str] = {}
 
         # Stack for undo last validated
-        self.undo_stack: List[Tuple[CountryNumber, VatStatus]] = []  # (key, previous_status)
+        self.undo_stack: List[Tuple[CountryNumber, VatStatus]] = []
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -194,26 +183,26 @@ class VATValidatorApp:
         
         self.root.configure(bg=UIStyles.BG_MAIN)
         
-        # Typography
         style.configure("Treeview", rowheight=UIStyles.TREEVIEW_ROWHEIGHT, background=UIStyles.CARD_BG, fieldbackground=UIStyles.CARD_BG, foreground=UIStyles.TREEVIEW_HEADING_FG)
         style.configure("Treeview.Heading", font=UIStyles.FONT_HEADING, background=UIStyles.TREEVIEW_HEADING_BG, foreground=UIStyles.TREEVIEW_HEADING_FG)
         style.configure("TNotebook", background=UIStyles.CARD_BG)
         style.configure("TNotebook.Tab", padding=(UIStyles.NOTEBOOK_TAB_PADDING_X, UIStyles.NOTEBOOK_TAB_PADDING_Y))
 
     def setup_ui(self) -> None:
+        """Construye la interfaz gráfica completa."""
         # Root grid
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=0)
 
-        # Main container (soft blue background)
+        # Main container
         main = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
         main.grid(row=0, column=0, sticky="nsew", padx=UIStyles.MAIN_PADDING, pady=UIStyles.MAIN_PADDING)
         main.columnconfigure(0, weight=1)
         main.rowconfigure(2, weight=1)  # content
         main.rowconfigure(3, weight=0)  # log
 
-        # Header (navy blue background, white text)
+        # Header
         header = tk.Frame(main, bg=UIStyles.HEADER_BG)
         header.grid(row=0, column=0, sticky="ew", pady=(0, UIStyles.CONTENT_PADDING_Y), padx=0)
         header.columnconfigure(0, weight=1)
@@ -223,7 +212,7 @@ class VATValidatorApp:
         subtitle = tk.Label(header, text="Validación masiva de números VAT europeos", font=UIStyles.FONT_SUBTITLE, bg=UIStyles.HEADER_BG, fg=UIStyles.TEXT_SUBTITLE)
         subtitle.grid(row=1, column=0, sticky="w", padx=UIStyles.CONTENT_PADDING_X, pady=(2, UIStyles.BUTTON_PADY))
 
-        # Toolbar (simplified)
+        # Toolbar
         toolbar = tk.Frame(main, bg=UIStyles.BG_MAIN)
         toolbar.grid(row=1, column=0, sticky="ew", pady=(UIStyles.BUTTON_PADY, UIStyles.CARD_PADDING_Y), padx=UIStyles.CONTENT_PADDING_X)
         toolbar.columnconfigure(4, weight=1)
@@ -249,7 +238,7 @@ class VATValidatorApp:
         self.undo_btn.grid(row=0, column=4, padx=(0, 8))
         self.undo_btn.state(["disabled"])
 
-        # Export menu button (right side)
+        # Export menu button
         self.export_menu_btn = ttk.Menubutton(toolbar, text="Exportar ▾", bootstyle="secondary-outline")
         self.export_menu_btn.grid(row=0, column=5, sticky="e", padx=(0, 0))
         self.export_menu_btn.state(["disabled"])
@@ -266,22 +255,20 @@ class VATValidatorApp:
         content.columnconfigure(0, weight=1)
         content.rowconfigure(0, weight=1)
 
-        # Results card (white frame, no Labelframe)
+        # Results card
         results_card = tk.Frame(content, bg=UIStyles.CARD_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.CARD_BORDERWIDTH, highlightbackground=UIStyles.CARD_BORDER, highlightthickness=1)
         results_card.grid(row=0, column=0, sticky="nsew", pady=(0, 12), padx=16)
         results_card.columnconfigure(0, weight=1)
         results_card.rowconfigure(2, weight=1)
         
-        # Title label on white background
         tk.Label(results_card, text="Resultados", font=UIStyles.FONT_LABEL, bg=UIStyles.CARD_BG, fg=UIStyles.TEXT_PRIMARY, anchor="w", padx=UIStyles.CARD_PADDING_X, pady=UIStyles.CARD_PADDING_Y).grid(row=0, column=0, sticky="ew")
 
-        # Banner for pending VATs (will be shown/hidden dynamically)
+        # Banner frame
         self.banner_frame = tk.Frame(results_card, bg=UIStyles.BANNER_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.BANNER_BORDERWIDTH, highlightbackground=UIStyles.BANNER_BORDER, highlightthickness=1)
         self.banner_frame.grid(row=1, column=0, sticky="ew", padx=UIStyles.CARD_PADDING_Y, pady=UIStyles.CARD_PADDING_Y)
         self.banner_frame.columnconfigure(0, weight=1)
-        self.banner_frame.grid_remove()  # Hidden by default
+        self.banner_frame.grid_remove()
         
-        # Banner content
         banner_content = tk.Frame(self.banner_frame, bg=UIStyles.BANNER_BG)
         banner_content.grid(row=0, column=0, sticky="ew", padx=UIStyles.BANNER_PADDING_X, pady=UIStyles.BANNER_PADDING_Y)
         banner_content.columnconfigure(0, weight=1)
@@ -292,136 +279,100 @@ class VATValidatorApp:
         banner_btn_frame = tk.Frame(banner_content, bg=UIStyles.BANNER_BG)
         banner_btn_frame.grid(row=0, column=1, sticky="e", padx=(UIStyles.BANNER_PADDING_X, 0))
         
-        # Custom styled buttons for banner
         self.banner_go_pending_btn = tk.Button(banner_btn_frame, text="Ir a Pendientes", bg=UIStyles.BANNER_BTN_BG, fg=UIStyles.BANNER_BTN_FG, font=UIStyles.FONT_SMALL, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.BUTTON_BORDERWIDTH, padx=UIStyles.BUTTON_SMALL_PADX, pady=UIStyles.BUTTON_SMALL_PADY, cursor="hand2", command=self._go_to_pending_tab, activebackground=UIStyles.BANNER_BTN_ACTIVE_BG, activeforeground=UIStyles.BANNER_BTN_ACTIVE_FG)
         self.banner_go_pending_btn.grid(row=0, column=0, padx=(0, UIStyles.BUTTON_SMALL_PADX))
         
         self.banner_retry_btn = tk.Button(banner_btn_frame, text="Reintentar ahora", bg=UIStyles.BANNER_BTN_BG, fg=UIStyles.BANNER_BTN_FG, font=UIStyles.FONT_SMALL, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.BUTTON_BORDERWIDTH, padx=UIStyles.BUTTON_SMALL_PADX, pady=UIStyles.BUTTON_SMALL_PADY, cursor="hand2", command=self.retry_pending, activebackground=UIStyles.BANNER_BTN_ACTIVE_BG, activeforeground=UIStyles.BANNER_BTN_ACTIVE_FG)
         self.banner_retry_btn.grid(row=0, column=1)
-        Tooltip(self.banner_retry_btn, "Reintenta los VAT que estén listos en este momento.")
 
+        # Notebook (Pendientes / Validados)
         self.notebook = ttk.Notebook(results_card)
-        self.notebook.grid(row=2, column=0, sticky="nsew", padx=UIStyles.CARD_PADDING_X, pady=(0, UIStyles.CONTENT_PADDING_Y))
+        self.notebook.grid(row=2, column=0, sticky="nsew", padx=UIStyles.CONTENT_PADDING_X, pady=UIStyles.CONTENT_PADDING_Y)
 
-        # Tabs
-        self.pending_tab = ttk.Frame(self.notebook, padding=(UIStyles.TREE_PADDING, UIStyles.TREE_PADDING))
-        self.validated_tab = ttk.Frame(self.notebook, padding=(UIStyles.TREE_PADDING, UIStyles.TREE_PADDING))
-        self.notebook.add(self.pending_tab, text="Pendientes")
-        self.notebook.add(self.validated_tab, text="Validados")
+        # Pending tab
+        pending_frame = ttk.Frame(self.notebook)
+        self.notebook.add(pending_frame, text="Pendientes")
+        self._build_tree_frame(pending_frame, kind="pending")
 
-        self._build_tab(self.pending_tab, kind="pending")
-        self._build_tab(self.validated_tab, kind="validated")
+        # Validated tab
+        validated_frame = ttk.Frame(self.notebook)
+        self.notebook.add(validated_frame, text="Validados")
+        self._build_tree_frame(validated_frame, kind="validated")
 
-        # Log card (white frame, no Labelframe)
-        log_card = tk.Frame(main, bg=UIStyles.CARD_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.CARD_BORDERWIDTH, highlightbackground=UIStyles.CARD_BORDER, highlightthickness=1)
-        log_card.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 12))
-        log_card.columnconfigure(0, weight=1)
-        log_card.rowconfigure(1, weight=1)
+        # Log frame
+        log_frame = tk.Frame(main, bg=UIStyles.BG_MAIN)
+        log_frame.grid(row=3, column=0, sticky="nsew", pady=(UIStyles.CONTENT_PADDING_Y, 0))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
 
-        # Header with title and controls
-        header_row = tk.Frame(log_card, bg=UIStyles.CARD_BG)
-        header_row.grid(row=0, column=0, sticky="ew", padx=12, pady=8)
-        header_row.columnconfigure(0, weight=1)
-        
-        tk.Label(header_row, text="Registro de actividad", font=UIStyles.FONT_LABEL, bg=UIStyles.CARD_BG, fg=UIStyles.TEXT_PRIMARY, anchor="w").grid(row=0, column=0, sticky="w")
+        tk.Label(log_frame, text="Actividad", font=UIStyles.FONT_LABEL, bg=UIStyles.BG_MAIN, fg=UIStyles.TEXT_PRIMARY, anchor="w").pack(side=tk.TOP, fill=tk.X, padx=8)
 
-        # Controls right
-        controls = tk.Frame(header_row, bg=UIStyles.CARD_BG)
-        controls.grid(row=0, column=1, sticky="e")
+        log_text_frame = tk.Frame(log_frame, bg=UIStyles.CARD_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.CARD_BORDERWIDTH)
+        log_text_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(4, 0))
+        log_text_frame.columnconfigure(0, weight=1)
+        log_text_frame.rowconfigure(0, weight=1)
 
-        self.autoscroll_chk = ttk.Checkbutton(controls, text="Auto-scroll", variable=self.log_autoscroll_var, bootstyle="round-toggle")
-        self.autoscroll_chk.grid(row=0, column=0, padx=(0, 10))
+        self.log_text = tk.Text(log_text_frame, height=UIStyles.LOG_HEIGHT_LINES, bg=UIStyles.LOG_BG, fg=UIStyles.LOG_FG, font=UIStyles.FONT_MONOSPACE, state=tk.DISABLED, wrap=tk.WORD)
+        self.log_text.grid(row=0, column=0, sticky="nsew")
 
-        ttk.Button(controls, text="Limpiar", bootstyle="secondary-outline", command=self.clear_log).grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(controls, text="Copiar", bootstyle="secondary-outline", command=self.copy_log).grid(row=0, column=2)
+        log_scrollbar = ttk.Scrollbar(log_text_frame, orient=tk.VERTICAL, command=self.log_text.yview, bootstyle="round")
+        log_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.log_text.configure(yscrollcommand=log_scrollbar.set)
 
-        # Text + scrollbar (reduced height)
-        text_frame = tk.Frame(log_card, bg=UIStyles.CARD_BG)
-        text_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
-        text_frame.columnconfigure(0, weight=1)
+        self._install_log_scroll_detection(log_scrollbar)
 
-        self.log_text = tk.Text(
-            text_frame,
-            height=UIStyles.LOG_HEIGHT,
-            wrap=tk.WORD,
-            font=UIStyles.FONT_MONOSPACE,
-            bg=UIStyles.LOG_BG,
-            fg=UIStyles.LOG_FG,
-            insertbackground=UIStyles.LOG_FG,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=UIStyles.CARD_BORDER,
-            highlightcolor="#b6c2cf",
-        )
-        self.log_text.grid(row=0, column=0, sticky="ew")
+        # Log tags
+        self.log_text.tag_config("OK", foreground=UIStyles.LOG_OK)
+        self.log_text.tag_config("WARN", foreground=UIStyles.LOG_WARN)
+        self.log_text.tag_config("ERROR", foreground=UIStyles.LOG_ERROR)
+        self.log_text.tag_config("INFO", foreground=UIStyles.LOG_INFO)
+        self.log_text.tag_config("DEBUG", foreground=UIStyles.LOG_DEBUG)
 
-        log_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.log_text.yview, bootstyle="round")
-        log_scroll.grid(row=0, column=1, sticky="ns")
-        self.log_text.configure(yscrollcommand=log_scroll.set)
-        self.log_text.configure(state=tk.DISABLED)
+        # Log controls
+        log_control_frame = tk.Frame(log_frame, bg=UIStyles.BG_MAIN)
+        log_control_frame.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(4, 0))
 
-        # Tags
-        self.log_text.tag_configure("OK", foreground=UIStyles.LOG_OK)
-        self.log_text.tag_configure("WARN", foreground=UIStyles.LOG_WARN)
-        self.log_text.tag_configure("ERROR", foreground=UIStyles.LOG_ERROR)
-        self.log_text.tag_configure("INFO", foreground=UIStyles.LOG_INFO)
-        self.log_text.tag_configure("DEBUG", foreground=UIStyles.LOG_DEBUG)
+        ttk.Button(log_control_frame, text="Limpiar registro", bootstyle="secondary-outline", padding=(8, 4), command=self.clear_log).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(log_control_frame, text="Copiar registro", bootstyle="secondary-outline", padding=(8, 4), command=self.copy_log).pack(side=tk.LEFT)
 
-        # Auto-scroll inteligente: si el usuario sube, lo apagamos
-        self._install_log_scroll_detection(log_scroll)
+        # Status bar
+        status_frame = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
+        status_frame.grid(row=1, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=(UIStyles.MAIN_PADDING, 0))
+        status_frame.columnconfigure(0, weight=1)
 
-        # Footer (status + exit)
-        footer = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
-        footer.grid(row=1, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=UIStyles.BUTTON_PADY)
-        footer.columnconfigure(0, weight=1)
+        self.status_label = tk.Label(status_frame, textvariable=self.status_var, font=UIStyles.FONT_STATUS, bg=UIStyles.BG_MAIN, fg=UIStyles.TEXT_PRIMARY, anchor="w")
+        self.status_label.pack(side=tk.LEFT, fill=tk.X)
 
-        self.status_label = tk.Label(footer, textvariable=self.status_var, anchor="w", bg=UIStyles.BG_MAIN, fg=UIStyles.TEXT_PRIMARY, font=UIStyles.FONT_STATUS, padx=UIStyles.CARD_PADDING_X)
-        self.status_label.grid(row=0, column=0, sticky="ew")
+    def _build_tree_frame(self, parent: ttk.Frame, kind: str) -> None:
+        """Construye un frame con búsqueda y tabla de VATs."""
+        # Search frame
+        search_frame = ttk.Frame(parent)
+        search_frame.pack(fill=tk.X, pady=(0, 8))
 
-        self.exit_btn = ttk.Button(footer, text="Salir", bootstyle="danger-outline", width=12, command=self.exit_app)
-        self.exit_btn.grid(row=0, column=1, sticky="e", padx=(UIStyles.BUTTON_PADY, 0), pady=(UIStyles.BUTTON_SMALL_PADY, UIStyles.CARD_PADDING_Y))
-
-    def _build_tab(self, parent: ttk.Frame, kind: str) -> None:
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(1, weight=1)
-
-        # Search
-        row = ttk.Frame(parent)
-        row.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Label(row, text="Buscar:").grid(row=0, column=0, sticky="w")
-
-        if kind == "pending":
-            entry = ttk.Entry(row, textvariable=self.search_pending_var)
-            entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-            row.columnconfigure(1, weight=1)
-            entry.bind("<KeyRelease>", lambda _e: self.refresh_trees())
-        else:
-            entry = ttk.Entry(row, textvariable=self.search_validated_var)
-            entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-            row.columnconfigure(1, weight=1)
-            entry.bind("<KeyRelease>", lambda _e: self.refresh_trees())
+        search_var = self.search_pending_var if kind == "pending" else self.search_validated_var
+        ttk.Label(search_frame, text="Buscar:").pack(side=tk.LEFT, padx=(0, 8))
+        entry = ttk.Entry(search_frame, textvariable=search_var)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+        entry.bind("<KeyRelease>", lambda _e: self.refresh_trees())
 
         # Tree
         tree_frame = ttk.Frame(parent)
-        tree_frame.grid(row=1, column=0, sticky="nsew")
+        tree_frame.pack(fill=tk.BOTH, expand=True)
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
-        # Define columns based on kind
         if kind == "pending":
             cols = ("VAT", "País", "Número", "Nombre", "Estado", "Intentos", "Última verificación", "Siguiente intento", "Error", "Acción")
         else:
             cols = ("VAT", "País", "Número", "Nombre", "Estado", "Última verificación")
 
         tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=UIStyles.TREEVIEW_HEIGHT)
-        tree.grid(row=0, column=0, sticky="nsew")
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Configure headings and columns
         for c in cols:
             tree.heading(c, text=c)
             tree.column(c, width=120, anchor="w")
 
-        # Adjust column widths
         tree.column("VAT", width=UIStyles.COL_VAT)
         tree.column("País", width=UIStyles.COL_COUNTRY, anchor="center")
         tree.column("Número", width=UIStyles.COL_NUMBER)
@@ -438,18 +389,18 @@ class VATValidatorApp:
             tree.column("Última verificación", width=UIStyles.COL_LAST_CHECK)
 
         yscroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview, bootstyle="round")
-        yscroll.grid(row=0, column=1, sticky="ns")
+        yscroll.pack(side=tk.RIGHT, fill=tk.Y)
         tree.configure(yscrollcommand=yscroll.set)
 
-        xscroll = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=tree.xview, bootstyle="round")
-        xscroll.grid(row=1, column=0, sticky="ew")
+        xscroll = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=tree.xview, bootstyle="round")
+        xscroll.pack(fill=tk.X)
         tree.configure(xscrollcommand=xscroll.set)
 
         # Zebra striping
         tree.tag_configure("row_even", background=UIStyles.TREE_ROW_EVEN)
         tree.tag_configure("row_odd", background=UIStyles.TREE_ROW_ODD)
 
-        # Row tags (colors)
+        # Row tags (colors by status)
         tree.tag_configure("VALID", foreground=UIStyles.STATUS_VALID)
         tree.tag_configure("INVALID", foreground=UIStyles.STATUS_INVALID)
         tree.tag_configure("PENDING", foreground=UIStyles.STATUS_PENDING)
@@ -459,7 +410,6 @@ class VATValidatorApp:
         tree.tag_configure("PENDING_MAX", foreground=UIStyles.STATUS_PENDING_MAX)
         tree.tag_configure("INVALID_FORMAT", foreground=UIStyles.STATUS_INVALID_FORMAT)
 
-        # Bindings
         tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         tree.bind("<Button-1>", self.on_tree_click)
         tree.bind("<Double-1>", self.on_tree_double_click)
@@ -471,8 +421,7 @@ class VATValidatorApp:
         else:
             self.validated_tree = tree
 
-        # Context menu (minimal)
-        # Nota: se construye una sola vez y se reutiliza.
+        # Context menu
         self.tree_context_menu = tk.Menu(self.root, tearoff=0)
         self.tree_context_menu.add_command(label="Abrir en VIES (web)", command=self.open_vies_web)
         self.tree_context_menu.add_separator()
@@ -480,7 +429,7 @@ class VATValidatorApp:
         self.tree_context_menu.add_command(label="Copiar VAT completo", command=lambda: self.copy_vat(number_only=False))
 
     def _install_log_scroll_detection(self, scrollbar: ttk.Scrollbar) -> None:
-        # Detectar cuando el usuario se separa del final: desactivar auto-scroll.
+        """Detecta cuando el usuario se separa del final del log."""
         def on_scroll(*args):
             self.log_text.yview(*args)
             self._check_log_autoscroll_state()
@@ -488,7 +437,6 @@ class VATValidatorApp:
         scrollbar.configure(command=on_scroll)
 
         def on_mousewheel(event):
-            # Windows uses delta, other platforms may differ.
             try:
                 self.log_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
             except Exception:
@@ -499,9 +447,8 @@ class VATValidatorApp:
         self.log_text.bind("<MouseWheel>", on_mousewheel)
 
     def _check_log_autoscroll_state(self) -> None:
-        # yview returns (first, last) in [0,1]
+        """Verifica si el usuario está al final del log."""
         _, last = self.log_text.yview()
-        # If not at bottom, auto-scroll OFF
         if last < 0.999:
             self.log_autoscroll_var.set(False)
 
@@ -510,12 +457,14 @@ class VATValidatorApp:
     # -------------------------
 
     def set_status(self, msg: str, timeout_ms: int = 4000) -> None:
+        """Actualiza la barra de estado."""
         self.status_var.set(msg)
         self.status_label.update_idletasks()
         if timeout_ms > 0:
             self.root.after(timeout_ms, lambda: self.status_var.set("Listo"))
 
     def _log(self, level: str, message: str) -> None:
+        """Escribe línea en el log con nivel."""
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {message}\n"
         self.log_text.configure(state=tk.NORMAL)
@@ -556,6 +505,7 @@ class VATValidatorApp:
     # -------------------------
 
     def accion_text(self, status: VatStatus) -> str:
+        """Determina el texto del botón de acción para un estado."""
         if status in {VatStatus.THROTTLED, VatStatus.TIMEOUT, VatStatus.ERROR, VatStatus.PENDING_MAX}:
             return "[[ Abrir VIES ]]"
         return ""
@@ -565,7 +515,7 @@ class VATValidatorApp:
     # -------------------------
 
     def _active_tree(self) -> ttk.Treeview:
-        # active tab tree: pending or validated
+        """Retorna el árbol visible (Pendientes o Validados)."""
         tab = self.notebook.index(self.notebook.select())
         return self.pending_tree if tab == 0 else self.validated_tree
 
@@ -578,6 +528,7 @@ class VATValidatorApp:
             self.validate_selected_btn.state(["disabled"])
 
     def on_tree_motion(self, event) -> None:
+        """Detecta si el cursor está sobre botón de acción."""
         tree = event.widget
         region = tree.identify_region(event.x, event.y)
         if region != "cell":
@@ -588,7 +539,7 @@ class VATValidatorApp:
         if not row:
             tree.configure(cursor="")
             return
-        # Acción is last column
+        # Last column is "Acción"
         if col == f"#{len(tree['columns'])}":
             vals = tree.item(row, "values")
             if vals and str(vals[-1]).strip():
@@ -597,95 +548,77 @@ class VATValidatorApp:
         tree.configure(cursor="")
 
     def on_tree_click(self, event) -> None:
+        """Maneja clics en la tabla."""
         tree = event.widget
         region = tree.identify_region(event.x, event.y)
         if region != "cell":
             return
         col = tree.identify_column(event.x)
         row = tree.identify_row(event.y)
-        if not row:
+        if not row or not col:
             return
-        # Acción column
-        if col == f"#{len(tree['columns'])}":
+        # Click on "Acción" column?
+        if tree == self.pending_tree and col == f"#{len(self.pending_tree['columns'])}":
             vals = tree.item(row, "values")
             if vals and str(vals[-1]).strip():
-                tree.selection_set(row)
                 self.open_vies_web()
 
     def on_tree_double_click(self, event) -> None:
+        """Maneja doble click: abre VIES."""
         tree = event.widget
         row = tree.identify_row(event.y)
-        if not row:
-            return
-        vals = tree.item(row, "values")
-        if vals and str(vals[-1]).strip():
-            tree.selection_set(row)
+        if row:
             self.open_vies_web()
 
     def show_context_menu(self, event) -> None:
-        tree = event.widget
-        row = tree.identify_row(event.y)
-        if not row:
-            return
-        tree.selection_set(row)
-        self.tree_context_menu.tk_popup(event.x_root, event.y_root)
-
-    def copy_vat(self, number_only: bool) -> None:
-        sel = self._get_selected_key()
-        if not sel:
-            return
-        info = self.vat_data.get(sel)
-        if not info:
-            return
-        text = get_vat_number_only(info.vat_clean) if number_only else info.vat_clean
-        self.root.clipboard_clear()
-        self.root.clipboard_append(text)
-        if number_only:
-            self.set_status(f"Copiado: {text} (País: {info.country})", 3500)
-        else:
-            self.set_status(f"Copiado: {text}", 2500)
+        """Muestra menú contextual."""
+        try:
+            tree = event.widget
+            item = tree.identify_row(event.y)
+            if item:
+                tree.selection_set(item)
+                self.tree_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.tree_context_menu.grab_release()
 
     def open_vies_web(self) -> None:
-        sel = self._get_selected_key()
-        if not sel:
+        """Abre sitio web VIES y copia número VAT."""
+        key = self._get_selected_key()
+        if not key:
+            messagebox.showinfo("Info", "Selecciona un VAT.")
             return
-        info = self.vat_data.get(sel)
-        if not info:
-            return
-        number_only = get_vat_number_only(info.vat_clean)
-
-        def do_ui():
+        info = self.vat_data.get(key)
+        if info:
+            num_only = get_vat_number_only(info.vat_clean)
             self.root.clipboard_clear()
-            self.root.clipboard_append(number_only)
-            
-            # Show confirmation dialog
-            dialog_msg = (
-                f"Se ha copiado al portapapeles el número: {number_only}\n"
-                f"País: {info.country}\n\n"
-                f"En VIES selecciona el país {info.country} y pega el número.\n\n"
-                f"¿Quieres abrir VIES ahora?"
-            )
-            
-            status_msg = f"Copiado: {number_only} (País {info.country}). Confirmación para abrir VIES."
-            self.set_status(status_msg, 3500)
-            
-            # Ask user for confirmation
-            if messagebox.askokcancel("Abrir VIES", dialog_msg):
-                webbrowser.open(self.VIES_WEB)
+            self.root.clipboard_append(num_only)
+            webbrowser.open(self.VIES_WEB)
+            self.set_status(f"Número {num_only} copiado al portapapeles, abriendo VIES...", 3000)
 
-        # Execute in UI thread
-        self.root.after(0, do_ui)
+    def copy_vat(self, number_only: bool = False) -> None:
+        """Copia número VAT al portapapeles."""
+        key = self._get_selected_key()
+        if not key:
+            messagebox.showinfo("Info", "Selecciona un VAT.")
+            return
+        info = self.vat_data.get(key)
+        if info:
+            text = get_vat_number_only(info.vat_clean) if number_only else info.vat_clean
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.set_status(f"'{text}' copiado al portapapeles", 2000)
 
     # -------------------------
-    # Loading / rendering
+    # Refresh trees
     # -------------------------
 
     def refresh_trees(self) -> None:
-        # Re-render both trees based on filters
+        """Actualiza ambas tablas (Pendientes y Validados)."""
         self._render_pending_tree()
         self._render_validated_tree()
 
     def _render_pending_tree(self) -> None:
+        """Renderiza tabla de VATs pendientes."""
         tree = self.pending_tree
         tree.delete(*tree.get_children())
         self.pending_tree_iids.clear()
@@ -695,10 +628,6 @@ class VATValidatorApp:
         for idx, (key, info) in enumerate(self.vat_data.items()):
             if info.status in self.VALIDATED_STATES:
                 continue
-            if info.status == VatStatus.INVALID_FORMAT:
-                # keep in pending tab
-                pass
-
             if q:
                 hay = f"{info.vat_clean} {info.nombre_excel}".lower()
                 if q not in hay:
@@ -728,6 +657,7 @@ class VATValidatorApp:
             self.pending_tree_iids[key] = iid
 
     def _render_validated_tree(self) -> None:
+        """Renderiza tabla de VATs validados."""
         tree = self.validated_tree
         tree.delete(*tree.get_children())
         self.validated_tree_iids.clear()
@@ -743,7 +673,6 @@ class VATValidatorApp:
                     continue
 
             last_checked = info.last_checked_at
-            # Only 6 columns for validated tree
             values = (
                 info.vat_clean,
                 info.country,
@@ -758,13 +687,13 @@ class VATValidatorApp:
             self.validated_tree_iids[key] = iid
 
     def _get_selected_key(self) -> Optional[CountryNumber]:
+        """Obtiene clave del VAT seleccionado en la tabla activa."""
         tree = self._active_tree()
         sel = tree.selection()
         if not sel:
             return None
         iid = sel[0]
         try:
-            # iid is str(key) where key is tuple; recover by searching
             vals = tree.item(iid, "values")
             if not vals:
                 return None
@@ -779,6 +708,7 @@ class VATValidatorApp:
     # -------------------------
 
     def load_excel(self) -> None:
+        """Carga archivo Excel con datos VAT."""
         if self.processing:
             messagebox.showinfo("Info", "Hay una validación en curso.")
             return
@@ -793,95 +723,17 @@ class VATValidatorApp:
         self.selected_file = Path(file_path)
         self.vat_data.clear()
 
-        # UI state
         self.retry_btn.state(["disabled"])
         self.export_menu_btn.state(["disabled"])
         self.validate_selected_btn.state(["disabled"])
 
         try:
-            wb = load_workbook(file_path, data_only=True)
-            ws = wb.active
-
-            # Detect header row: find columns containing NIF/VAT
-            header_row = None
-            nif_col = None
-            name_col = None
-
-            for r in range(1, min(30, ws.max_row) + 1):
-                row_vals = [ws.cell(row=r, column=c).value for c in range(1, ws.max_column + 1)]
-                row_text = " ".join([str(v).strip().upper() for v in row_vals if v is not None])
-                if any(k in row_text for k in ["NIF", "VAT", "VAT NUMBER", "VAT_NUMBER"]):
-                    header_row = r
-                    # Find column indices
-                    for c in range(1, ws.max_column + 1):
-                        val = ws.cell(row=r, column=c).value
-                        if val is None:
-                            continue
-                        t = str(val).strip().upper()
-                        if t in {"NIF", "VAT", "VAT NUMBER", "VAT_NUMBER"}:
-                            nif_col = c
-                        if t in {"NOMBRE", "NAME", "RAZON SOCIAL", "RAZÓN SOCIAL"}:
-                            name_col = c
-                    break
-
-            if header_row is None or nif_col is None:
-                # fallback: if first column looks like VAT values
-                header_row = 1
-                nif_col = 1
-
-            # Load data
-            for r in range(header_row + 1, ws.max_row + 1):
-                raw_vat = ws.cell(row=r, column=nif_col).value
-                if raw_vat is None:
-                    continue
-
-                country, number, vat_clean = parse_vat(raw_vat)
-                nombre_excel = ""
-                if name_col:
-                    v = ws.cell(row=r, column=name_col).value
-                    if v is not None:
-                        nombre_excel = str(v).strip()
-
-                if not vat_clean:
-                    continue
-
-                if not country or not number:
-                    # invalid format
-                    # Use placeholder country/number to keep stable key: try to split anyway
-                    # We'll store under ("", vat_clean)
-                    key = ("", vat_clean)
-                    self.vat_data[key] = VatInfo(vat_clean=vat_clean, country="", number="", nombre_excel=nombre_excel, status=VatStatus.INVALID_FORMAT, last_error="Formato inválido")
-                    continue
-
-                key = (country, number)
-
-                # Cache hit (VALID/INVALID): reuse
-                cached = self._cache.get(key)
-                if cached and cached.status in self.VALIDATED_STATES:
-                    info = VatInfo(
-                        vat_clean=vat_clean,
-                        country=country,
-                        number=number,
-                        nombre_excel=nombre_excel or cached.nombre_excel,
-                        status=cached.status,
-                        vies_name=cached.vies_name,
-                        vies_address=cached.vies_address,
-                        attempts_hard=cached.attempts_hard,
-                        throttles=cached.throttles,
-                        last_checked_at=cached.last_checked_at,
-                        last_error=cached.last_error,
-                    )
-                    self.vat_data[key] = info
-                    continue
-
-                self.vat_data[key] = VatInfo(vat_clean=vat_clean, country=country, number=number, nombre_excel=nombre_excel)
-
+            self.vat_data = load_excel(self.selected_file)
             self.refresh_trees()
 
             self.log_ok(f"Cargados {len(self.vat_data)} VATs únicos desde {self.selected_file.name}")
             self.set_status(f"Excel cargado: {len(self.vat_data)} VATs. Pulsa 'Validar' para comenzar.", 3500)
 
-            # Enable controls
             self.validate_btn.state(["!disabled"])
             self.export_menu_btn.state(["!disabled"])
 
@@ -890,6 +742,7 @@ class VATValidatorApp:
             messagebox.showerror("Error", f"No se pudo cargar el archivo: {e}")
 
     def export_to_excel(self, scope: str = "all") -> None:
+        """Exporta resultados a archivo Excel."""
         if not self.vat_data:
             messagebox.showinfo("Info", "No hay datos para exportar")
             return
@@ -912,50 +765,7 @@ class VATValidatorApp:
             return
 
         try:
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "VAT Results"
-
-            headers = [
-                "VAT_CLEAN",
-                "COUNTRY",
-                "NUMBER",
-                "NOMBRE_EXCEL",
-                "STATUS",
-                "ATTEMPTS",
-                "THROTTLES",
-                "LAST_CHECKED_AT",
-                "NEXT_RETRY_AT",
-                "VIES_NAME",
-                "VIES_ADDRESS",
-                "ERROR",
-            ]
-            for i, h in enumerate(headers, start=1):
-                ws.cell(row=1, column=i, value=h)
-
-            row = 2
-            for key, info in self.vat_data.items():
-                if scope == "pending" and info.status in self.VALIDATED_STATES:
-                    continue
-                if scope == "validated" and info.status not in self.VALIDATED_STATES:
-                    continue
-
-                attempts = info.attempts_hard + info.throttles
-                ws.cell(row=row, column=1, value=info.vat_clean)
-                ws.cell(row=row, column=2, value=info.country)
-                ws.cell(row=row, column=3, value=info.number)
-                ws.cell(row=row, column=4, value=info.nombre_excel)
-                ws.cell(row=row, column=5, value=status_code(info.status))
-                ws.cell(row=row, column=6, value=attempts)
-                ws.cell(row=row, column=7, value=info.throttles)
-                ws.cell(row=row, column=8, value=info.last_checked_at)
-                ws.cell(row=row, column=9, value=info.next_retry_at.strftime("%Y-%m-%d %H:%M:%S") if info.next_retry_at else "")
-                ws.cell(row=row, column=10, value=info.vies_name)
-                ws.cell(row=row, column=11, value=info.vies_address)
-                ws.cell(row=row, column=12, value=info.last_error)
-                row += 1
-
-            wb.save(out)
+            save_excel(Path(out), self.vat_data, scope=scope)
             self.log_ok(f"Exportado: {Path(out).name}")
             self.set_status(f"Exportado: {Path(out).name}", 3500)
             messagebox.showinfo("Éxito", f"Resultados exportados a:\n{out}")
@@ -968,6 +778,7 @@ class VATValidatorApp:
     # -------------------------
 
     def start_validation(self) -> None:
+        """Inicia validación de todos los VATs nuevos."""
         if self.processing:
             return
 
@@ -990,6 +801,7 @@ class VATValidatorApp:
         t.start()
 
     def retry_pending(self) -> None:
+        """Reintenta VATs pendientes listos para reintento."""
         if self.processing:
             return
 
@@ -1027,6 +839,7 @@ class VATValidatorApp:
         t.start()
 
     def validate_selected(self) -> None:
+        """Valida un VAT seleccionado."""
         if self.processing:
             return
         key = self._get_selected_key()
@@ -1038,7 +851,6 @@ class VATValidatorApp:
         if not info or not info.country or not info.number:
             return
 
-        # 1 intento inmediato
         self.processing = True
         self._stop_event.clear()
         self.load_btn.state(["disabled"])
@@ -1055,22 +867,21 @@ class VATValidatorApp:
     def _validate_batch_worker(self, items: List[Tuple[CountryNumber, VatInfo]]) -> None:
         """Worker que valida un lote de VATs usando el planificador."""
         callbacks = UIThreadCallbacks(self)
-
-        # Create scheduler and run validation
-        scheduler = ValidationScheduler(self.vat_data, callbacks, self._stop_event)
+        scheduler = RetryScheduler(self.vat_data, callbacks, self._stop_event)
         scheduler.validate_batch(items)
 
     def _on_vat_updated_main_thread(self, key: CountryNumber, info: VatInfo, result: dict) -> None:
+        """Callback principal: VAT actualizado."""
         self._apply_result(info, result)
-
-        # Cache VALID/INVALID
         if info.status in self.VALIDATED_STATES:
             self._cache[key] = info
 
     def _on_progress_main_thread(self, done: int, total: int) -> None:
+        """Callback: Actualizar progreso."""
         self.set_status(f"Validando… {done}/{total}", 0)
 
     def _on_banner_update_main_thread(self, text: str, next_retry_seconds: Optional[int] = None) -> None:
+        """Callback: Actualizar banner."""
         if text:
             self.banner_label.config(text=text)
             self.banner_frame.grid()
@@ -1078,14 +889,15 @@ class VATValidatorApp:
             self._update_banner()
 
     def _on_batch_finished_main_thread(self, summary: BatchSummary) -> None:
+        """Callback: Validación completada."""
         self._finish_validation(summary)
 
     def _apply_result(self, info: VatInfo, result: dict) -> Optional[float]:
-        """Aplica resultado de validación a VatInfo y actualiza UI."""
+        """Aplica resultado de validación a VatInfo."""
         status: VatStatus = result.get("status")
         now = datetime.now()
         info.last_checked_at = now.strftime("%Y-%m-%d %H:%M:%S")
-        prev_status = info.status  # Save previous status for undo
+        prev_status = info.status
 
         if status == VatStatus.VALID:
             info.status = VatStatus.VALID
@@ -1094,11 +906,9 @@ class VATValidatorApp:
             info.last_error = ""
             info.next_retry_at = None
             self.log_ok(f"{info.vat_clean} → VALID")
-            # Save to undo stack if transitioning to validated
             if prev_status not in self.VALIDATED_STATES:
                 self.undo_stack.append(((info.country, info.number), prev_status))
                 self.root.after(0, lambda: self.undo_btn.state(["!disabled"]))
-
             self.root.after(0, self.refresh_trees)
             return None
 
@@ -1109,11 +919,9 @@ class VATValidatorApp:
             info.last_error = ""
             info.next_retry_at = None
             self.log_warn(f"{info.vat_clean} → INVALID")
-            # Save to undo stack if transitioning to validated
             if prev_status not in self.VALIDATED_STATES:
                 self.undo_stack.append(((info.country, info.number), prev_status))
                 self.root.after(0, lambda: self.undo_btn.state(["!disabled"]))
-
             self.root.after(0, self.refresh_trees)
             return None
 
@@ -1121,8 +929,6 @@ class VATValidatorApp:
             info.throttles += 1
             info.status = VatStatus.THROTTLED
             info.last_error = result.get("error", "MS_MAX_CONCURRENT_REQ")
-
-            # Retry suggestion
             throttles = info.throttles
             if throttles == 1:
                 jitter = random.uniform(2, 7)
@@ -1130,16 +936,14 @@ class VATValidatorApp:
                 jitter = random.uniform(5, 12)
             else:
                 jitter = random.uniform(10, 25)
-
             info.next_retry_at = now + timedelta(seconds=jitter)
             self.log_warn(f"{info.vat_clean} → THROTTLED ({throttles}) | retry {info.next_retry_at.strftime('%H:%M:%S')}")
-
             self.root.after(0, self.refresh_trees)
             return info.next_retry_at.timestamp() if info.next_retry_at else None
 
         elif status in {VatStatus.TIMEOUT, VatStatus.ERROR}:
             info.attempts_hard += 1
-            max_attempts = ValidationScheduler.MAX_ATTEMPTS
+            max_attempts = RetryScheduler.MAX_ATTEMPTS
             if info.attempts_hard >= max_attempts:
                 info.status = VatStatus.PENDING_MAX
                 info.last_error = result.get("error", "")
@@ -1152,7 +956,6 @@ class VATValidatorApp:
                 info.last_error = result.get("error", "")
                 info.next_retry_at = now + timedelta(seconds=random.uniform(2, 6))
                 self.log_warn(f"{info.vat_clean} → {status_code(status)} ({info.attempts_hard}/{max_attempts})")
-
                 self.root.after(0, self.refresh_trees)
                 return info.next_retry_at.timestamp() if info.next_retry_at else None
 
@@ -1166,6 +969,7 @@ class VATValidatorApp:
         return None
 
     def _finish_validation(self, summary: Optional[BatchSummary] = None) -> None:
+        """Finaliza validación y actualiza UI."""
         self.processing = False
         self.load_btn.state(["!disabled"])
         self.validate_btn.state(["!disabled"])
@@ -1174,7 +978,6 @@ class VATValidatorApp:
         self.refresh_trees()
         self._update_banner()
 
-        # Calculate summary counts
         if summary is not None:
             pending = summary.pending
             valid = summary.valid
@@ -1184,10 +987,8 @@ class VATValidatorApp:
             valid = sum(1 for v in self.vat_data.values() if v.status == VatStatus.VALID)
             invalid = sum(1 for v in self.vat_data.values() if v.status == VatStatus.INVALID)
         
-        # Log summary
         self.log_info(f"✓ Validación completada: {valid} válidos, {invalid} inválidos, {pending} pendientes")
         
-        # Update status bar with summary
         if pending > 0:
             status_msg = (
                 f"Validación completada: {valid} válidos, {invalid} inválidos, {pending} pendientes. "
@@ -1199,26 +1000,22 @@ class VATValidatorApp:
             self.set_status(status_msg, 4500)
 
     def _update_banner(self) -> None:
-        """Actualiza banner de VATs pendientes con conteos actuales y tiempos de reintento."""
+        """Actualiza banner de VATs pendientes."""
         pending = sum(1 for v in self.vat_data.values() if v.status not in self.VALIDATED_STATES)
         valid = sum(1 for v in self.vat_data.values() if v.status == VatStatus.VALID)
         invalid = sum(1 for v in self.vat_data.values() if v.status == VatStatus.INVALID)
         
-        # If validation is complete (no pending), show completion message
         if pending == 0 and (valid > 0 or invalid > 0):
             banner_text = f"✓ Validación terminada: {valid} válidos, {invalid} inválidos"
             self.banner_label.config(text=banner_text)
             self.banner_frame.grid()
-            # Auto-hide completion banner after 10 seconds
             self.root.after(10000, lambda: self.banner_frame.grid_remove())
             return
         
-        # If there are no VATs at all, hide banner
         if pending == 0:
             self.banner_frame.grid_remove()
             return
         
-        # Find next retry time for pending VATs
         now = datetime.now()
         next_retry_time = None
         for v in self.vat_data.values():
@@ -1226,7 +1023,6 @@ class VATValidatorApp:
                 if next_retry_time is None or v.next_retry_at < next_retry_time:
                     next_retry_time = v.next_retry_at
         
-        # Update banner text with full summary
         if next_retry_time and next_retry_time > now:
             wait_secs = int((next_retry_time - now).total_seconds())
             banner_text = f"{valid} válidos, {invalid} inválidos, {pending} pendientes (próximo reintento en {wait_secs}s)"
@@ -1256,8 +1052,6 @@ class VATValidatorApp:
         if not info:
             return
         
-        # Reset to NEW status so it can be validated again with "Validar" batch
-        # Clean up all fields that block batch processing
         info.status = VatStatus.NEW
         info.last_error = ""
         info.next_retry_at = None
@@ -1272,7 +1066,6 @@ class VATValidatorApp:
         self.refresh_trees()
         self._update_banner()
         
-        # Update undo button state
         if not self.undo_stack:
             self.undo_btn.state(["disabled"])
         
@@ -1293,13 +1086,3 @@ class VATValidatorApp:
         if messagebox.askyesno("Salir", msg):
             self._stop_event.set()
             self.root.destroy()
-
-
-def main() -> None:
-    root = ttk.Window(themename="flatly")
-    app = VATValidatorApp(root)
-    root.mainloop()
-
-
-if __name__ == "__main__":
-    main()

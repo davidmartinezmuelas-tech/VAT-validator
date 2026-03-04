@@ -1,4 +1,4 @@
-"""Lógica de validación VIES y gestión del cliente SOAP."""
+"""Cliente SOAP VIES para validación de números VAT europeos."""
 
 import threading
 import requests
@@ -10,7 +10,11 @@ from .models import VatStatus
 
 
 class ViesValidator:
-    """Maneja llamadas de API SOAP VIES con pool de conexiones thread-local."""
+    """Maneja llamadas de API SOAP VIES con pool de conexiones thread-local.
+    
+    Valida números VAT contra el servicio oficial de la Comisión Europea.
+    Implementa connection pooling por hilo para reducir latencia y timeouts.
+    """
     
     VIES_WSDL = "https://ec.europa.eu/taxation_customs/vies/checkVatService.wsdl"
     VIES_WEB = "https://ec.europa.eu/taxation_customs/vies/"
@@ -24,17 +28,17 @@ class ViesValidator:
         """Valida VAT con el servicio VIES.
         
         Args:
-            country_code: C\u00f3digo de pa\u00eds de 2 letras (ej: "ES")
-            vat_number: N\u00famero VAT sin prefijo de pa\u00eds
+            country_code: Código de país de 2 letras (ej: "ES")
+            vat_number: Número VAT sin prefijo de país
             
         Returns:
             Dict con claves:
                 - status: VatStatus
-                - vies_name: nombre de empresa (si es v\u00e1lido)
-                - vies_address: direcci\u00f3n de empresa (si es v\u00e1lido)
+                - vies_name: nombre de empresa (si es válido)
+                - vies_address: dirección de empresa (si es válido)
                 - error: mensaje de error (si aplica)
         """
-        # Reutiliza conexi\u00f3n por hilo para reducir latencia y TIMEOUTs.
+        # Reutiliza conexión por hilo para reducir latencia y TIMEOUTs.
         try:
             client = getattr(self._thread_local, "vies_client", None)
             if client is None:

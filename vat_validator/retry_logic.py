@@ -1,16 +1,23 @@
-"""Planificador de validación con workers, throttling y cooldown por país."""
+"""Lógica de reintento y scheduling para validación concurrente de VAT.
+
+Implementa un planificador con workers concurrentes, throttling y circuit breaker por país.
+"""
 
 import time
 import threading
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from .models import VatInfo, CountryNumber, VatStatus, VALIDATED_STATES
-from .validator import ViesValidator
+from .vies_client import ViesValidator
 from .callbacks import ValidationCallbacks, BatchSummary
 
 
-class ValidationScheduler:
-    """Gestiona validación concurrente con throttling y circuit breaker por país."""
+class RetryScheduler:
+    """Gestiona validación concurrente con throttling y circuit breaker por país.
+    
+    Coordina múltiples workers que validan VATs de forma paralela, respetando
+    límites de concurrencia por país y throttling global entre requests.
+    """
     
     MAX_ATTEMPTS = 3
     MAX_WORKERS = 3
@@ -26,7 +33,7 @@ class ValidationScheduler:
         
         Args:
             vat_data: Diccionario de datos VAT a validar
-            callbacks: Interface de callbacks para notificaciones worker -> UI
+            callbacks: Interface de callbacks para notificaciones worker → UI
             stop_event: Evento de threading para señal de parada
         """
         self.vat_data = vat_data
@@ -47,6 +54,10 @@ class ValidationScheduler:
     def validate_batch(self, items: List[Tuple[CountryNumber, VatInfo]]) -> None:
         """Ejecuta validación para un lote de items VAT.
         
+        Crea workers que procesan items en paralelo, respetando límites de concurrencia
+        y throttling. Continúa hasta que todos los items alcanzan estado terminal
+        o el usuario detiene la validación.
+        
         Args:
             items: Lista de tuplas (key, VatInfo) a validar
         """
@@ -54,7 +65,7 @@ class ValidationScheduler:
         completed = 0
         completed_lock = threading.Lock()
         
-        # Keys that reached a terminal state inside this run
+        # Keys que alcanzaron estado terminal en esta ejecución
         finished: set[CountryNumber] = set()
         
         # Queue scheduler: (ready_time, counter, key)
@@ -78,9 +89,9 @@ class ValidationScheduler:
             nonlocal pending
             if not pending:
                 return None
-            # find first ready + available country
+            # encuentra primer item listo + país disponible
             current = time.time()
-            scan = min(len(pending), 60)  # evita que 15 primeros bloqueen a otros países
+            scan = min(len(pending), 60)  # evita que los primeros bloqueen a otros países
             for idx, (ready, _c, key) in enumerate(pending[:scan]):
                 info = self.vat_data.get(key)
                 if not info:
@@ -225,10 +236,12 @@ class ValidationScheduler:
         )
     
     def _should_auto_retry(self, info: VatInfo) -> Optional[float]:
-        """Determine if VAT should be auto-retried.
+        """Determina si un VAT debe ser reintentado automáticamente.
+        
+        Verifica límites de reintento, deadline y estado actual.
         
         Returns:
-            Timestamp when ready for retry, or None if no auto-retry
+            Timestamp cuando el VAT estará listo para reintento, o None si no se reintenta
         """
         if not self.AUTO_RETRY_ENABLED:
             return None

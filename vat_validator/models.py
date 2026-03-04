@@ -8,10 +8,11 @@ from enum import Enum
 from typing import Optional, Tuple
 
 
-CountryNumber = Tuple[str, str]  # (country, number)
+CountryNumber = Tuple[str, str]  # (país, número)
 
 
 class VatStatus(Enum):
+    """Estados posibles de validación de un número VAT."""
     NEW = "NEW"
     VALIDATING = "VALIDATING"
     VALID = "VALID"
@@ -48,16 +49,19 @@ class VatInfo:
     auto_retry_count: int = 0
 
     def is_terminal(self) -> bool:
+        """Verifica si el estado es terminal."""
         return self.status in TERMINAL_STATES
 
     def is_retryable(self) -> bool:
+        """Verifica si el estado permite reintentos."""
         return self.status in RETRYABLE_STATES
 
     def is_manual_only(self) -> bool:
+        """Verifica si solo permite reintentos manuales."""
         return self.status in MANUAL_ONLY_STATES
 
 
-# Estado constants
+# Constantes de estado
 PENDING_STATES = {
     VatStatus.NEW,
     VatStatus.VALIDATING,
@@ -72,7 +76,7 @@ RETRYABLE_STATES = {VatStatus.THROTTLED, VatStatus.TIMEOUT, VatStatus.ERROR, Vat
 MANUAL_ONLY_STATES = {VatStatus.PENDING_MAX, VatStatus.INVALID_FORMAT}
 
 
-# Helper functions
+# Funciones auxiliares
 
 def normalize_vat(vat) -> Optional[str]:
     """Normaliza número VAT: elimina espacios, no-alfanuméricos, mayúsculas.

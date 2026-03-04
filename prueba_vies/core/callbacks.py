@@ -1,4 +1,4 @@
-"""Callback contracts for communication between core workers and UI."""
+"""Contratos de callbacks para comunicación entre workers de core y UI."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class BatchSummary:
 
 
 class ValidationCallbacks:
-    """Callback interface invoked by core scheduler from worker threads."""
+    """Interface de callbacks invocada por el planificador de core desde worker threads."""
 
     def on_vat_updated(self, key: CountryNumber, vat_info: VatInfo, result: dict) -> None:
         pass

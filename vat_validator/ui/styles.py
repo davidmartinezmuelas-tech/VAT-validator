@@ -1,5 +1,4 @@
-"""
-Estilos de UI para VIES VAT Validator
+"""Estilos de UI para VIES VAT Validator
 
 Centraliza todas las constantes visuales (colores, fuentes, tamaños, espaciado) para mejorar
 mantenibilidad y consistencia en toda la aplicación.
@@ -98,62 +97,34 @@ class UIStyles:
     BUTTON_SMALL_PADY = 4
     CARD_PADDING_X = 12  # card internal padding
     CARD_PADDING_Y = 8
-    BANNER_PADDING_X = 12  # banner padding
-    BANNER_PADDING_Y = 8
-    TOOLTIP_PADX = 8
-    TOOLTIP_PADY = 4
-    
-    # Table/Tree sizing
-    TREEVIEW_ROWHEIGHT = 28  # row height in treeview
-    TREEVIEW_HEIGHT = 12  # default number of visible rows
-    LOG_HEIGHT = 5  # log text widget height
-    
-    # Column widths (treeview)
-    COL_VAT = 140
-    COL_COUNTRY = 60
-    COL_NUMBER = 120
-    COL_NAME = 220
-    COL_STATUS = 140
-    COL_ATTEMPTS = 80
-    COL_LAST_CHECK = 150
-    COL_NEXT_RETRY = 130
-    COL_ERROR = 210
-    COL_ACTION = 120
-    
-    # Border and relief
     CARD_BORDERWIDTH = 1
-    CARD_RELIEF = "solid"
-    BUTTON_BORDERWIDTH = 0
+    CARD_RELIEF = "flat"
+    BUTTON_BORDERWIDTH = 1
     BANNER_BORDERWIDTH = 1
-    TOOLTIP_BORDERWIDTH = 1
-    
-    # -------------------------
-    # TIMING/DELAYS
-    # -------------------------
-    
-    TOOLTIP_DELAY_MS = 400  # tooltip show delay
-    LOG_WRAPLENGTH = 0  # 0 = auto-wrap to window
-    TOOLTIP_WRAPLENGTH = 250  # tooltip wrap width
-    
-    # -------------------------
-    # NOTEBOOK/TAB SETTINGS
-    # -------------------------
-    
-    NOTEBOOK_TAB_PADDING_X = 14  # horizontal padding in tabs
-    NOTEBOOK_TAB_PADDING_Y = 8  # vertical padding in tabs
-    
-    # -------------------------
-    # TREE PADDING (internal)
-    # -------------------------
-    
-    TREE_PADDING = 10  # padding inside tree frame
+    BANNER_PADDING_X = 12
+    BANNER_PADDING_Y = 8
 
+    # Treeview and log settings
+    TREEVIEW_HEIGHT = 25
+    TREEVIEW_ROWHEIGHT = 24
+    LOG_HEIGHT_LINES = 10
+    NOTEBOOK_TAB_PADDING_X = 16
+    NOTEBOOK_TAB_PADDING_Y = 8
 
-# Función de conveniencia para obtener tuplas de fuente
-def get_font(font_name: str, size: int = None, style: str = None):
-    """Helper para construir tuplas de fuentes dinámicamente si es necesario."""
-    if size is None:
-        return getattr(UIStyles, font_name, ("Segoe UI", 11))
-    if style:
-        return (font_name, size, style)
-    return (font_name, size)
+    # Column widths
+    COL_VAT = 140
+    COL_COUNTRY = 80
+    COL_NUMBER = 120
+    COL_NAME = 160
+    COL_STATUS = 130
+    COL_ATTEMPTS = 80
+    COL_LAST_CHECK = 130
+    COL_NEXT_RETRY = 130
+    COL_ERROR = 180
+    COL_ACTION = 100
+
+    # Tooltips
+    TOOLTIP_DELAY_MS = 500
+    TOOLTIP_PADX = 8
+    TOOLTIP_PADY = 6
+    TOOLTIP_WRAPLENGTH = 300
