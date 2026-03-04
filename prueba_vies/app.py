@@ -13,12 +13,9 @@ Notas:
 
 from __future__ import annotations
 
-import re
-import time
 import random
 import threading
 import webbrowser
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
@@ -28,16 +25,23 @@ from tkinter import filedialog, messagebox
 
 import ttkbootstrap as ttk
 
-import requests
 from openpyxl import load_workbook, Workbook
-from zeep import Client
-from zeep.exceptions import Fault, TransportError
-from zeep.transports import Transport
 
 from ui_styles import UIStyles
-
-
-CountryNumber = Tuple[str, str]  # (country, number)
+from core.models import (
+    VatInfo,
+    VatStatus,
+    CountryNumber,
+    PENDING_STATES,
+    VALIDATED_STATES,
+    parse_vat,
+    get_vat_number_only,
+    status_label,
+    status_code,
+)
+from core.validator import ViesValidator
+from core.scheduler import ValidationScheduler
+from core.callbacks import ValidationCallbacks, BatchSummary
 
 
 class Tooltip:
@@ -91,48 +95,32 @@ class Tooltip:
             self.tipwindow = None
 
 
-@dataclass
-class VatInfo:
-    vat_clean: str
-    country: str
-    number: str
-    nombre_excel: str = ""
+class UIThreadCallbacks(ValidationCallbacks):
+    """Schedules core callback notifications onto Tk main thread."""
 
-    status: str = "NEW"  # NEW | VALIDATING | VALID | INVALID | THROTTLED | TIMEOUT | ERROR | PENDING_MAX | INVALID_FORMAT
-    vies_name: str = ""
-    vies_address: str = ""
+    def __init__(self, app: "VATValidatorApp"):
+        self.app = app
 
-    attempts_hard: int = 0
-    throttles: int = 0
+    def on_vat_updated(self, key: CountryNumber, vat_info: VatInfo, result: dict) -> None:
+        self.app.root.after(0, lambda: self.app._on_vat_updated_main_thread(key, vat_info, result))
 
-    last_checked_at: str = ""
-    last_error: str = ""
+    def on_progress(self, done: int, total: int) -> None:
+        self.app.root.after(0, lambda: self.app._on_progress_main_thread(done, total))
 
-    next_retry_at: Optional[datetime] = None
+    def on_banner_update(self, text: str, next_retry_seconds: Optional[int] = None) -> None:
+        self.app.root.after(0, lambda: self.app._on_banner_update_main_thread(text, next_retry_seconds))
 
-    # Anti-bucle / UX rápida: límites de reintento automático (por VAT)
-    first_attempt_at: Optional[datetime] = None
-    auto_retry_count: int = 0
+    def on_batch_finished(self, summary: BatchSummary) -> None:
+        self.app.root.after(0, lambda: self.app._on_batch_finished_main_thread(summary))
 
 
 class VATValidatorApp:
-    VIES_WSDL = "https://ec.europa.eu/taxation_customs/vies/checkVatService.wsdl"
-    VIES_WEB = "https://ec.europa.eu/taxation_customs/vies/"  # página pública
-
-    TIMEOUT = 10
-    MAX_ATTEMPTS = 3
-    MAX_WORKERS = 3
-
-    # Reintento automático *corto* (no bloquea la UI ni se queda en bucle)
-    AUTO_RETRY_ENABLED = True
-    AUTO_RETRY_MAX = 2              # reintentos automáticos por VAT (además del primer intento)
-    AUTO_RETRY_DEADLINE_SEC = 25    # si en 25s no sale, se marca para manual
-
-    THROTTLE_MS = 250  # separación mínima entre requests
-
-    # Estados
-    PENDING_STATES = {"NEW", "VALIDATING", "THROTTLED", "TIMEOUT", "ERROR", "PENDING_MAX"}
-    VALIDATED_STATES = {"VALID", "INVALID"}
+    # Estados from core
+    PENDING_STATES = PENDING_STATES
+    VALIDATED_STATES = VALIDATED_STATES
+    
+    # VIES web page
+    VIES_WEB = ViesValidator.VIES_WEB
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -149,18 +137,6 @@ class VATValidatorApp:
         self.vat_data: Dict[CountryNumber, VatInfo] = {}
         self._cache: Dict[CountryNumber, VatInfo] = {}  # cache en memoria por sesión (solo VALID/INVALID)
 
-        # Concurrencia / throttle
-        self._active_countries: set[str] = set()
-        self._active_countries_lock = threading.Lock()
-        self._throttle_lock = threading.Lock()
-        self._last_request_time = 0.0
-
-        # Cooldown por país (mini circuit-breaker)
-        self._country_cooldown_until: Dict[str, float] = {}
-
-        # Reutilización de conexiones por hilo (reduce TIMEOUTs)
-        self._thread_local = threading.local()
-
         # UI state
         self.status_var = tk.StringVar(value="Listo")
         self.log_autoscroll_var = tk.BooleanVar(value=True)
@@ -174,7 +150,7 @@ class VATValidatorApp:
         self.validated_tree_iids: Dict[CountryNumber, str] = {}
 
         # Stack for undo last validated
-        self.undo_stack: List[Tuple[CountryNumber, str]] = []  # (key, previous_status)
+        self.undo_stack: List[Tuple[CountryNumber, VatStatus]] = []  # (key, previous_status)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
@@ -553,45 +529,8 @@ class VATValidatorApp:
     # VAT helpers
     # -------------------------
 
-    @staticmethod
-    def normalize_vat(vat) -> Optional[str]:
-        if vat is None:
-            return None
-        vat_str = str(vat).replace("\u00A0", "")
-        vat_clean = re.sub(r"[^A-Z0-9]", "", vat_str.upper())
-        return vat_clean or None
-
-    def parse_vat(self, vat) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        normalized = self.normalize_vat(vat)
-        if not normalized or len(normalized) < 3:
-            return None, None, normalized
-        if not re.match(r"^[A-Z]{2}", normalized):
-            return None, None, normalized
-        return normalized[:2], normalized[2:], normalized
-
-    @staticmethod
-    def get_vat_number_only(vat_clean: str) -> str:
-        vat_clean = re.sub(r"[^A-Z0-9]", "", (vat_clean or "").upper())
-        if re.match(r"^[A-Z]{2}", vat_clean):
-            return vat_clean[2:]
-        return vat_clean
-
-    def human_status(self, status: str) -> str:
-        mapping = {
-            "VALID": "✓ Válido",
-            "INVALID": "✕ Inválido",
-            "NEW": "⏳ Pendiente",
-            "VALIDATING": "⏳ Pendiente",
-            "THROTTLED": "⛔ Limitado por VIES",
-            "TIMEOUT": "… Sin respuesta",
-            "ERROR": "⚠ Error",
-            "PENDING_MAX": "⚠ No verificable ahora",
-            "INVALID_FORMAT": "✕ Formato inválido",
-        }
-        return mapping.get(status, status)
-
-    def accion_text(self, status: str) -> str:
-        if status in {"THROTTLED", "TIMEOUT", "ERROR", "PENDING_MAX"}:
+    def accion_text(self, status: VatStatus) -> str:
+        if status in {VatStatus.THROTTLED, VatStatus.TIMEOUT, VatStatus.ERROR, VatStatus.PENDING_MAX}:
             return "[[ Abrir VIES ]]"
         return ""
 
@@ -672,7 +611,7 @@ class VATValidatorApp:
         info = self.vat_data.get(sel)
         if not info:
             return
-        text = self.get_vat_number_only(info.vat_clean) if number_only else info.vat_clean
+        text = get_vat_number_only(info.vat_clean) if number_only else info.vat_clean
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
         if number_only:
@@ -687,7 +626,7 @@ class VATValidatorApp:
         info = self.vat_data.get(sel)
         if not info:
             return
-        number_only = self.get_vat_number_only(info.vat_clean)
+        number_only = get_vat_number_only(info.vat_clean)
 
         def do_ui():
             self.root.clipboard_clear()
@@ -730,7 +669,7 @@ class VATValidatorApp:
         for idx, (key, info) in enumerate(self.vat_data.items()):
             if info.status in self.VALIDATED_STATES:
                 continue
-            if info.status == "INVALID_FORMAT":
+            if info.status == VatStatus.INVALID_FORMAT:
                 # keep in pending tab
                 pass
 
@@ -750,7 +689,7 @@ class VATValidatorApp:
                 info.country,
                 info.number,
                 info.nombre_excel,
-                self.human_status(info.status),
+                status_label(info.status),
                 attempts,
                 last_checked,
                 retry,
@@ -759,7 +698,7 @@ class VATValidatorApp:
             )
             iid = str(key)
             row_tag = "row_even" if idx % 2 == 0 else "row_odd"
-            tree.insert("", "end", iid=iid, values=values, tags=(row_tag, info.status))
+            tree.insert("", "end", iid=iid, values=values, tags=(row_tag, status_code(info.status)))
             self.pending_tree_iids[key] = iid
 
     def _render_validated_tree(self) -> None:
@@ -784,12 +723,12 @@ class VATValidatorApp:
                 info.country,
                 info.number,
                 info.nombre_excel or info.vies_name,
-                self.human_status(info.status),
+                status_label(info.status),
                 last_checked,
             )
             iid = str(key)
             row_tag = "row_even" if idx % 2 == 0 else "row_odd"
-            tree.insert("", "end", iid=iid, values=values, tags=(row_tag, info.status))
+            tree.insert("", "end", iid=iid, values=values, tags=(row_tag, status_code(info.status)))
             self.validated_tree_iids[key] = iid
 
     def _get_selected_key(self) -> Optional[CountryNumber]:
@@ -870,7 +809,7 @@ class VATValidatorApp:
                 if raw_vat is None:
                     continue
 
-                country, number, vat_clean = self.parse_vat(raw_vat)
+                country, number, vat_clean = parse_vat(raw_vat)
                 nombre_excel = ""
                 if name_col:
                     v = ws.cell(row=r, column=name_col).value
@@ -885,7 +824,7 @@ class VATValidatorApp:
                     # Use placeholder country/number to keep stable key: try to split anyway
                     # We'll store under ("", vat_clean)
                     key = ("", vat_clean)
-                    self.vat_data[key] = VatInfo(vat_clean=vat_clean, country="", number="", nombre_excel=nombre_excel, status="INVALID_FORMAT", last_error="Formato inválido")
+                    self.vat_data[key] = VatInfo(vat_clean=vat_clean, country="", number="", nombre_excel=nombre_excel, status=VatStatus.INVALID_FORMAT, last_error="Formato inválido")
                     continue
 
                 key = (country, number)
@@ -980,7 +919,7 @@ class VATValidatorApp:
                 ws.cell(row=row, column=2, value=info.country)
                 ws.cell(row=row, column=3, value=info.number)
                 ws.cell(row=row, column=4, value=info.nombre_excel)
-                ws.cell(row=row, column=5, value=info.status)
+                ws.cell(row=row, column=5, value=status_code(info.status))
                 ws.cell(row=row, column=6, value=attempts)
                 ws.cell(row=row, column=7, value=info.throttles)
                 ws.cell(row=row, column=8, value=info.last_checked_at)
@@ -1006,7 +945,7 @@ class VATValidatorApp:
         if self.processing:
             return
 
-        to_validate = [(k, v) for k, v in self.vat_data.items() if v.status == "NEW" and v.country and v.number]
+        to_validate = [(k, v) for k, v in self.vat_data.items() if v.status == VatStatus.NEW and v.country and v.number]
         if not to_validate:
             return
 
@@ -1033,7 +972,7 @@ class VATValidatorApp:
         next_retry_time = None
 
         for k, v in self.vat_data.items():
-            if v.status in {"THROTTLED", "TIMEOUT", "ERROR", "PENDING_MAX"}:
+            if v.is_retryable():
                 if v.next_retry_at is None or v.next_retry_at <= now:
                     to_retry.append((k, v))
                 elif next_retry_time is None or v.next_retry_at < next_retry_time:
@@ -1088,162 +1027,42 @@ class VATValidatorApp:
         t.start()
 
     def _validate_batch_worker(self, items: List[Tuple[CountryNumber, VatInfo]]) -> None:
-        total = len(items)
-        completed = 0
+        """Worker that validates a batch of VATs using the scheduler."""
+        callbacks = UIThreadCallbacks(self)
 
-        # Keys that reached a terminal state inside this run
-        finished: set[CountryNumber] = set()
+        # Create scheduler and run validation
+        scheduler = ValidationScheduler(self.vat_data, callbacks, self._stop_event)
+        scheduler.validate_batch(items)
 
-        # Queue scheduler: (ready_time, counter, key)
-        pending: List[Tuple[float, int, CountryNumber]] = []
-        seq = 0
-        seq_lock = threading.Lock()
+    def _on_vat_updated_main_thread(self, key: CountryNumber, info: VatInfo, result: dict) -> None:
+        self._apply_result(info, result)
 
-        def next_seq() -> int:
-            nonlocal seq
-            with seq_lock:
-                seq += 1
-                return seq
-        now = time.time()
-        for k, _info in items:
-            pending.append((now, next_seq(), k))
+        # Cache VALID/INVALID
+        if info.status in self.VALIDATED_STATES:
+            self._cache[key] = info
 
-        pending.sort(key=lambda x: (x[0], x[1]))
+    def _on_progress_main_thread(self, done: int, total: int) -> None:
+        self.set_status(f"Validando… {done}/{total}", 0)
 
-        def pop_ready() -> Optional[CountryNumber]:
-            nonlocal pending
-            if not pending:
-                return None
-            # find first ready + available country
-            current = time.time()
-            scan = min(len(pending), 60)  # evita que 15 primeros bloqueen a otros países
-            for idx, (ready, _c, key) in enumerate(pending[:scan]):
-                info = self.vat_data.get(key)
-                if not info:
-                    continue
-                if ready > current:
-                    continue
+    def _on_banner_update_main_thread(self, text: str, next_retry_seconds: Optional[int] = None) -> None:
+        if text:
+            self.banner_label.config(text=text)
+            self.banner_frame.grid()
+        else:
+            self._update_banner()
 
-                # cooldown por país (mini circuit breaker)
-                cd_until = self._country_cooldown_until.get(info.country)
-                if cd_until and cd_until > current:
-                    continue
-
-                with self._active_countries_lock:
-                    if info.country in self._active_countries:
-                        continue
-                    self._active_countries.add(info.country)
-                # remove
-                pending.pop(idx)
-                return key
-            return None
-
-        def mark_country_done(country: str) -> None:
-            with self._active_countries_lock:
-                self._active_countries.discard(country)
-
-        def worker_loop():
-            nonlocal completed
-            while not self._stop_event.is_set():
-                key = pop_ready()
-                if key is None:
-                    if not pending:
-                        break
-                    time.sleep(0.08)
-                    continue
-
-                info = self.vat_data.get(key)
-                if not info:
-                    continue
-
-                try:
-                    # throttle global
-                    with self._throttle_lock:
-                        elapsed = time.time() - self._last_request_time
-                        min_gap = self.THROTTLE_MS / 1000.0
-                        if elapsed < min_gap:
-                            time.sleep(min_gap - elapsed)
-                        self._last_request_time = time.time()
-
-                    info.status = "VALIDATING"
-                    info.last_error = ""
-                    info.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                    if info.first_attempt_at is None:
-                        info.first_attempt_at = datetime.now()
-
-                    self.root.after(0, self.refresh_trees)
-
-                    result = self.validate_vat_with_vies(info.country, info.number)
-                    retry_ready_at = self._apply_result(info, result)
-
-                    # Si fue THROTTLED, ponemos un cooldown mínimo por país para no martillear
-                    if info.status == "THROTTLED" and info.next_retry_at is not None:
-                        self._country_cooldown_until[info.country] = max(
-                            self._country_cooldown_until.get(info.country, 0.0),
-                            info.next_retry_at.timestamp(),
-                        )
-
-                    # Auto requeue (corto + finito) para errores temporales
-                    if (
-                        self.AUTO_RETRY_ENABLED
-                        and retry_ready_at is not None
-                        and (info.country, info.number) not in finished
-                    ):
-                        # Deadline por VAT: si tarda demasiado, lo mandamos a manual
-                        if info.first_attempt_at is not None:
-                            elapsed = (datetime.now() - info.first_attempt_at).total_seconds()
-                        else:
-                            elapsed = 0
-
-                        if elapsed <= self.AUTO_RETRY_DEADLINE_SEC and info.auto_retry_count < self.AUTO_RETRY_MAX:
-                            info.auto_retry_count += 1
-                            pending.append((retry_ready_at, next_seq(), (info.country, info.number)))
-                            pending.sort(key=lambda x: (x[0], x[1]))
-                            # No contamos como completado aún
-                            continue
-                        else:
-                            # Se acabó el tiempo o el presupuesto: queda para manual
-                            info.status = "PENDING_MAX"
-                            info.next_retry_at = None
-                            info.last_error = info.last_error or "Manual recomendado (VIES inestable)"
-                            self.root.after(0, self.refresh_trees)
-
-                    # Terminal states for this run
-                    if info.status in self.VALIDATED_STATES or info.status in {"PENDING_MAX", "INVALID_FORMAT"}:
-                        finished.add((info.country, info.number))
-
-                    # Cache VALID/INVALID
-                    if info.status in self.VALIDATED_STATES:
-                        self._cache[(info.country, info.number)] = info
-
-                    # Completed count
-                    completed += 1
-                    self.root.after(0, lambda c=completed: self.set_status(f"Validando… {c}/{total}", 0))
-
-                finally:
-                    mark_country_done(info.country)
-
-        # Start workers
-        threads = []
-        for _ in range(min(self.MAX_WORKERS, max(1, total))):
-            t = threading.Thread(target=worker_loop, daemon=True)
-            t.start()
-            threads.append(t)
-
-        for t in threads:
-            t.join()
-
-        self.root.after(0, self._finish_validation)
+    def _on_batch_finished_main_thread(self, summary: BatchSummary) -> None:
+        self._finish_validation(summary)
 
     def _apply_result(self, info: VatInfo, result: dict) -> Optional[float]:
-        status = result.get("status")
+        """Apply validation result to VatInfo and update UI."""
+        status: VatStatus = result.get("status")
         now = datetime.now()
         info.last_checked_at = now.strftime("%Y-%m-%d %H:%M:%S")
         prev_status = info.status  # Save previous status for undo
 
-        if status == "VALID":
-            info.status = "VALID"
+        if status == VatStatus.VALID:
+            info.status = VatStatus.VALID
             info.vies_name = result.get("vies_name", "")
             info.vies_address = result.get("vies_address", "")
             info.last_error = ""
@@ -1252,13 +1071,13 @@ class VATValidatorApp:
             # Save to undo stack if transitioning to validated
             if prev_status not in self.VALIDATED_STATES:
                 self.undo_stack.append(((info.country, info.number), prev_status))
-                self.undo_btn.state(["!disabled"])
+                self.root.after(0, lambda: self.undo_btn.state(["!disabled"]))
 
             self.root.after(0, self.refresh_trees)
             return None
 
-        elif status == "INVALID":
-            info.status = "INVALID"
+        elif status == VatStatus.INVALID:
+            info.status = VatStatus.INVALID
             info.vies_name = ""
             info.vies_address = ""
             info.last_error = ""
@@ -1267,17 +1086,17 @@ class VATValidatorApp:
             # Save to undo stack if transitioning to validated
             if prev_status not in self.VALIDATED_STATES:
                 self.undo_stack.append(((info.country, info.number), prev_status))
-                self.undo_btn.state(["!disabled"])
+                self.root.after(0, lambda: self.undo_btn.state(["!disabled"]))
 
             self.root.after(0, self.refresh_trees)
             return None
 
-        elif status == "THROTTLED":
+        elif status == VatStatus.THROTTLED:
             info.throttles += 1
-            info.status = "THROTTLED"
+            info.status = VatStatus.THROTTLED
             info.last_error = result.get("error", "MS_MAX_CONCURRENT_REQ")
 
-            # Retry suggestion (no auto retry en el mismo batch)
+            # Retry suggestion
             throttles = info.throttles
             if throttles == 1:
                 jitter = random.uniform(2, 7)
@@ -1292,10 +1111,11 @@ class VATValidatorApp:
             self.root.after(0, self.refresh_trees)
             return info.next_retry_at.timestamp() if info.next_retry_at else None
 
-        elif status in {"TIMEOUT", "ERROR"}:
+        elif status in {VatStatus.TIMEOUT, VatStatus.ERROR}:
             info.attempts_hard += 1
-            if info.attempts_hard >= self.MAX_ATTEMPTS:
-                info.status = "PENDING_MAX"
+            max_attempts = ValidationScheduler.MAX_ATTEMPTS
+            if info.attempts_hard >= max_attempts:
+                info.status = VatStatus.PENDING_MAX
                 info.last_error = result.get("error", "")
                 info.next_retry_at = None
                 self.log_error(f"{info.vat_clean} → NO VERIFICABLE (máx intentos)")
@@ -1305,74 +1125,21 @@ class VATValidatorApp:
                 info.status = status
                 info.last_error = result.get("error", "")
                 info.next_retry_at = now + timedelta(seconds=random.uniform(2, 6))
-                self.log_warn(f"{info.vat_clean} → {status} ({info.attempts_hard}/{self.MAX_ATTEMPTS})")
+                self.log_warn(f"{info.vat_clean} → {status_code(status)} ({info.attempts_hard}/{max_attempts})")
 
                 self.root.after(0, self.refresh_trees)
                 return info.next_retry_at.timestamp() if info.next_retry_at else None
 
         else:
             info.attempts_hard += 1
-            info.status = "ERROR"
+            info.status = VatStatus.ERROR
             info.last_error = str(result.get("error", "Error"))
             self.log_error(f"{info.vat_clean} → ERROR")
 
         self.root.after(0, self.refresh_trees)
         return None
 
-    def validate_vat_with_vies(self, country_code: str, vat_number: str) -> dict:
-        # Reutilizamos conexión por hilo para reducir latencia y TIMEOUTs.
-        try:
-            client = getattr(self._thread_local, "vies_client", None)
-            if client is None:
-                session = requests.Session()
-                transport = Transport(session=session, timeout=self.TIMEOUT)
-                client = Client(wsdl=self.VIES_WSDL, transport=transport)
-                self._thread_local.vies_client = client
-
-            result = client.service.checkVat(countryCode=country_code, vatNumber=vat_number)
-
-            if result.valid:
-                return {
-                    "status": "VALID",
-                    "vies_name": getattr(result, "name", "") or "",
-                    "vies_address": getattr(result, "address", "") or "",
-                    "error": "",
-                }
-            return {"status": "INVALID", "vies_name": "", "vies_address": "", "error": ""}
-
-        except Fault as e:
-            msg = str(getattr(e, "message", "")) or str(e)
-            detail = str(getattr(e, "detail", ""))
-            if "MS_MAX_CONCURRENT_REQ" in msg or "MS_MAX_CONCURRENT_REQ" in detail:
-                return {"status": "THROTTLED", "error": "MS_MAX_CONCURRENT_REQ"}
-            if "SERVICE_UNAVAILABLE" in msg or "SERVICE_UNAVAILABLE" in detail:
-                return {"status": "THROTTLED", "error": "SERVICE_UNAVAILABLE"}
-            return {"status": "ERROR", "error": f"SOAP Fault: {msg[:120]}"}
-
-        except TransportError as e:
-            # 5xx suele ser temporal
-            try:
-                status_code = int(getattr(e, "status_code", 0) or 0)
-            except Exception:
-                status_code = 0
-            if status_code in {502, 503, 504}:
-                return {"status": "THROTTLED", "error": f"HTTP_{status_code}"}
-            return {"status": "TIMEOUT", "error": "TransportError"}
-
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectTimeout):
-            return {"status": "TIMEOUT", "error": "TIMEOUT"}
-
-        except requests.exceptions.RequestException as e:
-            return {"status": "ERROR", "error": f"Request error: {str(e)[:120]}"}
-
-        except Exception as e:
-            return {"status": "ERROR", "error": f"Unexpected: {str(e)[:120]}"}
-
-        finally:
-            # La sesión se mantiene viva por hilo; se cerrará al terminar el proceso.
-            pass
-
-    def _finish_validation(self) -> None:
+    def _finish_validation(self, summary: Optional[BatchSummary] = None) -> None:
         self.processing = False
         self.load_btn.state(["!disabled"])
         self.validate_btn.state(["!disabled"])
@@ -1382,9 +1149,14 @@ class VATValidatorApp:
         self._update_banner()
 
         # Calculate summary counts
-        pending = sum(1 for v in self.vat_data.values() if v.status not in self.VALIDATED_STATES)
-        valid = sum(1 for v in self.vat_data.values() if v.status == "VALID")
-        invalid = sum(1 for v in self.vat_data.values() if v.status == "INVALID")
+        if summary is not None:
+            pending = summary.pending
+            valid = summary.valid
+            invalid = summary.invalid
+        else:
+            pending = sum(1 for v in self.vat_data.values() if v.status not in self.VALIDATED_STATES)
+            valid = sum(1 for v in self.vat_data.values() if v.status == VatStatus.VALID)
+            invalid = sum(1 for v in self.vat_data.values() if v.status == VatStatus.INVALID)
         
         # Log summary
         self.log_info(f"✓ Validación completada: {valid} válidos, {invalid} inválidos, {pending} pendientes")
@@ -1403,8 +1175,8 @@ class VATValidatorApp:
     def _update_banner(self) -> None:
         """Update the pending VATs banner with current counts and retry times."""
         pending = sum(1 for v in self.vat_data.values() if v.status not in self.VALIDATED_STATES)
-        valid = sum(1 for v in self.vat_data.values() if v.status == "VALID")
-        invalid = sum(1 for v in self.vat_data.values() if v.status == "INVALID")
+        valid = sum(1 for v in self.vat_data.values() if v.status == VatStatus.VALID)
+        invalid = sum(1 for v in self.vat_data.values() if v.status == VatStatus.INVALID)
         
         # If validation is complete (no pending), show completion message
         if pending == 0 and (valid > 0 or invalid > 0):
@@ -1460,7 +1232,7 @@ class VATValidatorApp:
         
         # Reset to NEW status so it can be validated again with "Validar" batch
         # Clean up all fields that block batch processing
-        info.status = "NEW"
+        info.status = VatStatus.NEW
         info.last_error = ""
         info.next_retry_at = None
         info.attempts_hard = 0

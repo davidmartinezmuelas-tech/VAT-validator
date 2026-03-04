@@ -47,10 +47,50 @@ pip install -r requirements.txt
 > Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 > ```
 
+## Arquitectura
+
+El proyecto está organizado en dos capas: **UI** e **integración de negocio (core)**.
+
+### Componentes
+
+#### `app.py` (Punto de Entrada)
+Interfaz de usuario basada en **Tkinter + ttkbootstrap**. Responsable de:
+- Carga/descarga de Excel
+- Renderizado de tablas de VATs (pendientes/validados)
+- Botones de acción (Validar, Reintentar, Exportar, Abrir VIES)
+- Logs y feedback visual
+- Llamadas al core para iniciar validaciones
+
+#### `core/validator.py` (Validación VIES)
+Cliente **SOAP (zeep)** contra el servicio oficial VIES. Responsable de:
+- Conectarse a VIES y ejecutar `checkVat()`
+- Clasificar respuestas: VALID, INVALID, THROTTLED, TIMEOUT, ERROR, etc.
+- Manejo de errores específicos (timeouts, limitaciones, etc.)
+- Pool de conexiones thread-local para mejor rendimiento
+
+#### `core/scheduler.py` (Orquestación Concurrente)
+Ejecutor de validaciones con **trabajadores (workers)** concurrentes. Responsable de:
+- Cola de prioridad usando `bisect`
+- Máximo 3 workers simultáneos
+- Throttling global (250ms entre requests)
+- Cooldown por país (circuit breaker)
+- Auto-retry con deadline (25s) y límite (2 intentos)
+- Callbacks a la UI para notificar progreso y resultados
+
+#### `ui_styles.py` (Estilos UI)
+Constantes de tema y estilos de ttkbootstrap para mantener consistencia visual.
+
+#### `core/models.py` (Datos y Helpers)
+Dataclasses y utilidades:
+- `VatInfo`: Información completa de un VAT
+- `VatStatus`: Estado del VAT (VALID, THROTTLED, etc.)
+- Funciones de parsing, normalización, helpers
+
+
 ## Ejecutar
 
 ```bash
-python main.py
+python prueba_vies/app.py
 ```
 
 ## Uso
@@ -85,6 +125,7 @@ El Excel de salida incluye:
 ## Stack
 
 - GUI: **Tkinter / ttk**
+- UI Theme: **ttkbootstrap**
 - Excel: **openpyxl**
 - SOAP (VIES): **zeep**
 - HTTP: **requests**
