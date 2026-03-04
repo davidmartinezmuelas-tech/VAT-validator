@@ -11,10 +11,9 @@ Proporciona:
 
 from __future__ import annotations
 
-import random
 import threading
 import webbrowser
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
@@ -892,8 +891,13 @@ class VATValidatorApp:
         """Callback: Validación completada."""
         self._finish_validation(summary)
 
-    def _apply_result(self, info: VatInfo, result: dict) -> Optional[float]:
-        """Aplica resultado de validación a VatInfo."""
+    def _apply_result(self, info: VatInfo, result: dict) -> None:
+        """Aplica resultado de validación a VatInfo.
+        
+        La UI NO calcula política de retry (next_retry_at, backoff, jitter).
+        Solo refleja el estado que el core (retry_policy.py) ya decidió.
+        Responsabilidad única: Renderizar estado + logs.
+        """
         status: VatStatus = result.get("status")
         now = datetime.now()
         info.last_checked_at = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -904,69 +908,58 @@ class VATValidatorApp:
             info.vies_name = result.get("vies_name", "")
             info.vies_address = result.get("vies_address", "")
             info.last_error = ""
-            info.next_retry_at = None
             self.log_ok(f"{info.vat_clean} → VALID")
             if prev_status not in self.VALIDATED_STATES:
                 self.undo_stack.append(((info.country, info.number), prev_status))
                 self.root.after(0, lambda: self.undo_btn.state(["!disabled"]))
             self.root.after(0, self.refresh_trees)
-            return None
 
         elif status == VatStatus.INVALID:
             info.status = VatStatus.INVALID
             info.vies_name = ""
             info.vies_address = ""
             info.last_error = ""
-            info.next_retry_at = None
             self.log_warn(f"{info.vat_clean} → INVALID")
             if prev_status not in self.VALIDATED_STATES:
                 self.undo_stack.append(((info.country, info.number), prev_status))
                 self.root.after(0, lambda: self.undo_btn.state(["!disabled"]))
             self.root.after(0, self.refresh_trees)
-            return None
 
         elif status == VatStatus.THROTTLED:
-            info.throttles += 1
             info.status = VatStatus.THROTTLED
             info.last_error = result.get("error", "MS_MAX_CONCURRENT_REQ")
             throttles = info.throttles
-            if throttles == 1:
-                jitter = random.uniform(2, 7)
-            elif throttles == 2:
-                jitter = random.uniform(5, 12)
+            # next_retry_at ya fue calculado por RetryPolicy en el core
+            if info.next_retry_at:
+                retry_time = info.next_retry_at.strftime('%H:%M:%S')
+                self.log_warn(f"{info.vat_clean} → THROTTLED ({throttles}) | retry {retry_time}")
             else:
-                jitter = random.uniform(10, 25)
-            info.next_retry_at = now + timedelta(seconds=jitter)
-            self.log_warn(f"{info.vat_clean} → THROTTLED ({throttles}) | retry {info.next_retry_at.strftime('%H:%M:%S')}")
+                self.log_warn(f"{info.vat_clean} → THROTTLED ({throttles}) | no auto-retry")
             self.root.after(0, self.refresh_trees)
-            return info.next_retry_at.timestamp() if info.next_retry_at else None
 
         elif status in {VatStatus.TIMEOUT, VatStatus.ERROR}:
-            info.attempts_hard += 1
-            max_attempts = RetryScheduler.MAX_ATTEMPTS
-            if info.attempts_hard >= max_attempts:
-                info.status = VatStatus.PENDING_MAX
-                info.last_error = result.get("error", "")
-                info.next_retry_at = None
+            info.status = status
+            info.last_error = result.get("error", "")
+            # next_retry_at ya fue calculado por RetryPolicy
+            if info.status == VatStatus.PENDING_MAX:
                 self.log_error(f"{info.vat_clean} → NO VERIFICABLE (máx intentos)")
-                self.root.after(0, self.refresh_trees)
-                return None
             else:
-                info.status = status
-                info.last_error = result.get("error", "")
-                info.next_retry_at = now + timedelta(seconds=random.uniform(2, 6))
-                self.log_warn(f"{info.vat_clean} → {status_code(status)} ({info.attempts_hard}/{max_attempts})")
-                self.root.after(0, self.refresh_trees)
-                return info.next_retry_at.timestamp() if info.next_retry_at else None
+                attempts = info.attempts_hard
+                self.log_warn(f"{info.vat_clean} → {status_code(status)} ({attempts} intentos)")
+            self.root.after(0, self.refresh_trees)
+
+        elif status == VatStatus.PENDING_MAX:
+            info.status = VatStatus.PENDING_MAX
+            info.last_error = result.get("error", "")
+            self.log_error(f"{info.vat_clean} → NO VERIFICABLE (límite alcanzado)")
+            self.root.after(0, self.refresh_trees)
 
         else:
-            info.attempts_hard += 1
+            # Unknown status: treat as error
             info.status = VatStatus.ERROR
-            info.last_error = str(result.get("error", "Error"))
+            info.last_error = str(result.get("error", "Error desconocido"))
             self.log_error(f"{info.vat_clean} → ERROR")
-
-        self.root.after(0, self.refresh_trees)
-        return None
+            self.root.after(0, self.refresh_trees)
 
     def _finish_validation(self, summary: Optional[BatchSummary] = None) -> None:
         """Finaliza validación y actualiza UI."""

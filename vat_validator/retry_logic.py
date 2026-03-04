@@ -1,6 +1,7 @@
 """Lógica de reintento y scheduling para validación concurrente de VAT.
 
 Implementa un planificador con workers concurrentes, throttling y circuit breaker por país.
+La política de retry (backoff/jitter/deadlines) se delega a RetryPolicy.
 """
 
 import time
@@ -10,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from .models import VatInfo, CountryNumber, VatStatus, VALIDATED_STATES
 from .vies_client import ViesValidator
 from .callbacks import ValidationCallbacks, BatchSummary
+from .retry_policy import RetryPolicy
 
 
 class RetryScheduler:
@@ -19,14 +21,8 @@ class RetryScheduler:
     límites de concurrencia por país y throttling global entre requests.
     """
     
-    MAX_ATTEMPTS = 3
     MAX_WORKERS = 3
     THROTTLE_MS = 250  # separación mínima entre requests
-    
-    # Reintento automático *corto* (no bloquea la UI ni se queda en bucle)
-    AUTO_RETRY_ENABLED = True
-    AUTO_RETRY_MAX = 2              # reintentos automáticos por VAT (además del primer intento)
-    AUTO_RETRY_DEADLINE_SEC = 25    # si en 25s no sale, se marca para manual
     
     def __init__(self, vat_data: Dict[CountryNumber, VatInfo], callbacks: ValidationCallbacks, stop_event: threading.Event):
         """Inicializa el planificador.
@@ -41,6 +37,11 @@ class RetryScheduler:
         self.stop_event = stop_event
         
         self.validator = ViesValidator()
+        self.retry_policy = RetryPolicy(
+            max_auto_retries=2,
+            max_hard_attempts=3,
+            deadline_seconds=25,
+        )
         
         # Concurrencia / throttle
         self._active_countries: set[str] = set()
@@ -152,67 +153,41 @@ class RetryScheduler:
                     # Validate
                     result = self.validator.validate_vat(info.country, info.number)
                     
-                    # Process result
+                    # Process result - actualizar status y contadores
                     status = result.get("status")
+                    info.status = status
                     
-                    if status in {VatStatus.VALID, VatStatus.INVALID}:
-                        # Terminal: success
-                        finished.add(key)
-                        self.callbacks.on_vat_updated(key, info, result)
-                        with completed_lock:
-                            completed_local = completed + 1
-                            completed = completed_local
-                        self.callbacks.on_progress(completed_local, total)
-                        mark_country_done(info.country)
-                    
-                    elif status == VatStatus.THROTTLED:
-                        # Country cooldown
+                    if status == VatStatus.THROTTLED:
+                        info.throttles += 1
+                        info.last_error = result.get("error", "MS_MAX_CONCURRENT_REQ")
                         self._country_cooldown_until[info.country] = time.time() + 2.0
-                        
-                        # Retry logic
-                        next_ready = self._should_auto_retry(info)
-                        if next_ready is not None:
-                            # Re-queue
-                            pending.append((next_ready, next_seq(), key))
-                            pending.sort(key=lambda x: (x[0], x[1]))
-                        else:
-                            # Mark as manual retry needed
-                            finished.add(key)
-                        
-                        self.callbacks.on_vat_updated(key, info, result)
-                        with completed_lock:
-                            completed_local = completed + 1
-                            completed = completed_local
-                        self.callbacks.on_progress(completed_local, total)
-                        mark_country_done(info.country)
-                    
                     elif status in {VatStatus.TIMEOUT, VatStatus.ERROR}:
-                        # Retry logic
-                        next_ready = self._should_auto_retry(info)
-                        if next_ready is not None:
-                            # Re-queue
-                            pending.append((next_ready, next_seq(), key))
-                            pending.sort(key=lambda x: (x[0], x[1]))
-                        else:
-                            # Mark as manual retry needed
-                            finished.add(key)
-                        
-                        self.callbacks.on_vat_updated(key, info, result)
-                        with completed_lock:
-                            completed_local = completed + 1
-                            completed = completed_local
-                        self.callbacks.on_progress(completed_local, total)
-                        mark_country_done(info.country)
+                        info.attempts_hard += 1
+                        info.last_error = result.get("error", "")
                     
-                    else:
-                        # Unknown status: treat as error
+                    # Aplicar política de retry (única fuente de verdad)
+                    decision = self.retry_policy.apply_retry_decision(info)
+                    
+                    # Procesar decisión
+                    if status in {VatStatus.VALID, VatStatus.INVALID}:
+                        # Estados terminales: finalizar
                         finished.add(key)
-                        self.callbacks.on_vat_updated(key, info, result)
-                        with completed_lock:
-                            completed_local = completed + 1
-                            completed = completed_local
-                        self.callbacks.on_progress(completed_local, total)
-                        mark_country_done(info.country)
+                    elif decision.should_retry and info.next_retry_at:
+                        # Re-encolar con timestamp calculado por policy
+                        next_ready = info.next_retry_at.timestamp()
+                        pending.append((next_ready, next_seq(), key))
+                        pending.sort(key=lambda x: (x[0], x[1]))
+                    else:
+                        # No se reintenta: finalizar (puede ser PENDING_MAX)
+                        finished.add(key)
+                    
+                    # Notificar a UI
+                    self.callbacks.on_vat_updated(key, info, result)
+                    with completed_lock:
+                        completed_local = completed + 1
+                        completed = completed_local
+                    self.callbacks.on_progress(completed_local, total)
+                    mark_country_done(info.country)
                 
                 finally:
                     pass
@@ -234,37 +209,3 @@ class RetryScheduler:
         self.callbacks.on_batch_finished(
             BatchSummary(done=completed, total=total, valid=valid, invalid=invalid, pending=pending)
         )
-    
-    def _should_auto_retry(self, info: VatInfo) -> Optional[float]:
-        """Determina si un VAT debe ser reintentado automáticamente.
-        
-        Verifica límites de reintento, deadline y estado actual.
-        
-        Returns:
-            Timestamp cuando el VAT estará listo para reintento, o None si no se reintenta
-        """
-        if not self.AUTO_RETRY_ENABLED:
-            return None
-        
-        now = datetime.now()
-        
-        # Check deadline
-        if info.first_attempt_at:
-            elapsed = (now - info.first_attempt_at).total_seconds()
-            if elapsed > self.AUTO_RETRY_DEADLINE_SEC:
-                return None  # Deadline exceeded
-        
-        # Check retry count
-        if info.auto_retry_count >= self.AUTO_RETRY_MAX:
-            return None  # Max retries reached
-        
-        # Check hard attempts
-        if info.attempts_hard >= self.MAX_ATTEMPTS:
-            return None
-        
-        # Increment retry counter
-        info.auto_retry_count += 1
-        
-        # Schedule retry with exponential backoff
-        delay = min(2.0 ** info.auto_retry_count, 8.0)
-        return time.time() + delay
