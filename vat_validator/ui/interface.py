@@ -348,20 +348,20 @@ class VATValidatorApp:
         frame_bottom.grid(row=4, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=(UIStyles.CARD_PADDING_Y, UIStyles.MAIN_PADDING))
         frame_bottom.grid_columnconfigure(0, weight=1)
         frame_bottom.grid_columnconfigure(1, weight=0)
+        frame_bottom.grid_columnconfigure(2, weight=0)
 
         # Progress bar (column 0, expandible)
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_bar = ttk.Progressbar(frame_bottom, variable=self.progress_var, mode="determinate", maximum=100, bootstyle="info")
         self.progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, UIStyles.CARD_PADDING_Y))
 
-        # Exit button (column 1, fijo a la derecha)
-        self.exit_btn = ttk.Button(frame_bottom, text="Salir", bootstyle="danger-outline", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.exit_app)
-        self.exit_btn.grid(row=0, column=1, sticky="e")
+        # Status label (column 1, opcional)
+        self.status_label = tk.Label(frame_bottom, textvariable=self.status_var, font=UIStyles.FONT_STATUS, fg=UIStyles.TEXT_PRIMARY, anchor="w")
+        self.status_label.grid(row=0, column=1, sticky="ew", padx=(UIStyles.CARD_PADDING_Y, UIStyles.CARD_PADDING_Y))
 
-        # ==== STATUS LABEL ====
-        self.status_label = tk.Label(self.root, textvariable=self.status_var, font=UIStyles.FONT_STATUS, bg=UIStyles.BG_MAIN, fg=UIStyles.TEXT_PRIMARY, anchor="w")
-        self.status_label.grid(row=5, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=(0, 2))
-        self.root.rowconfigure(5, weight=0)
+        # Exit button (column 2, fijo a la derecha)
+        self.exit_btn = ttk.Button(frame_bottom, text="Salir", bootstyle="danger-outline", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.exit_app)
+        self.exit_btn.grid(row=0, column=2, sticky="e")
 
     def _build_tree_frame(self, parent: ttk.Frame, kind: str) -> None:
         """Construye un frame con búsqueda y tabla de VATs."""
