@@ -157,7 +157,7 @@ Usuario puede:
 ## Ejecutar
 
 ```bash
-python prueba_vies/app.py
+python main.py
 ```
 
 ## Uso
