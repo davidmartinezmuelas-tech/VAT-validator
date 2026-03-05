@@ -892,74 +892,82 @@ class VATValidatorApp:
         self._finish_validation(summary)
 
     def _apply_result(self, info: VatInfo, result: dict) -> None:
-        """Aplica resultado de validación a VatInfo.
+        """Aplica resultado de validación a VatInfo (solo campos presentacionales).
         
-        La UI NO calcula política de retry (next_retry_at, backoff, jitter).
-        Solo refleja el estado que el core (retry_policy.py) ya decidió.
-        Responsabilidad única: Renderizar estado + logs.
+        RESPONSABILIDAD ÚNICA: Renderizar estado ya decidido por el core.
+        
+        La UI NO modifica:
+        - info.status (ya actualizado por retry_logic.py)
+        - info.throttles, info.attempts_hard (ya actualizado por retry_logic.py)
+        - info.next_retry_at (ya calculado por RetryPolicy)
+        - info.last_error (ya actualizado por retry_logic.py)
+        
+        La UI SÍ actualiza (solo campos presentacionales):
+        - info.last_checked_at (timestamp de UI)
+        - info.vies_name, info.vies_address (datos de respuesta VIES)
+        
+        Y realiza acciones de UI:
+        - Escribir logs según info.status
+        - Refrescar tablas
+        - Habilitar/deshabilitar botones
         """
-        status: VatStatus = result.get("status")
+        # Campos presentacionales de UI (timestamp local)
         now = datetime.now()
         info.last_checked_at = now.strftime("%Y-%m-%d %H:%M:%S")
-        prev_status = info.status
-
+        
+        # Estado de negocio ya fue actualizado por core, solo lo leemos
+        status = info.status
+        prev_status_for_undo = result.get("_prev_status")  # Si core lo provee
+        
+        # Actualizar campos de respuesta VIES (solo para VALID)
         if status == VatStatus.VALID:
-            info.status = VatStatus.VALID
             info.vies_name = result.get("vies_name", "")
             info.vies_address = result.get("vies_address", "")
-            info.last_error = ""
             self.log_ok(f"{info.vat_clean} → VALID")
-            if prev_status not in self.VALIDATED_STATES:
-                self.undo_stack.append(((info.country, info.number), prev_status))
+            # Undo stack (solo si cambió a validado desde pendiente)
+            if prev_status_for_undo and prev_status_for_undo not in self.VALIDATED_STATES:
+                self.undo_stack.append(((info.country, info.number), prev_status_for_undo))
                 self.root.after(0, lambda: self.undo_btn.state(["!disabled"]))
-            self.root.after(0, self.refresh_trees)
 
         elif status == VatStatus.INVALID:
-            info.status = VatStatus.INVALID
             info.vies_name = ""
             info.vies_address = ""
-            info.last_error = ""
             self.log_warn(f"{info.vat_clean} → INVALID")
-            if prev_status not in self.VALIDATED_STATES:
-                self.undo_stack.append(((info.country, info.number), prev_status))
+            # Undo stack
+            if prev_status_for_undo and prev_status_for_undo not in self.VALIDATED_STATES:
+                self.undo_stack.append(((info.country, info.number), prev_status_for_undo))
                 self.root.after(0, lambda: self.undo_btn.state(["!disabled"]))
-            self.root.after(0, self.refresh_trees)
 
         elif status == VatStatus.THROTTLED:
-            info.status = VatStatus.THROTTLED
-            info.last_error = result.get("error", "MS_MAX_CONCURRENT_REQ")
+            # Solo logging (throttles ya fue incrementado por core)
             throttles = info.throttles
-            # next_retry_at ya fue calculado por RetryPolicy en el core
             if info.next_retry_at:
                 retry_time = info.next_retry_at.strftime('%H:%M:%S')
                 self.log_warn(f"{info.vat_clean} → THROTTLED ({throttles}) | retry {retry_time}")
             else:
                 self.log_warn(f"{info.vat_clean} → THROTTLED ({throttles}) | no auto-retry")
-            self.root.after(0, self.refresh_trees)
 
-        elif status in {VatStatus.TIMEOUT, VatStatus.ERROR}:
-            info.status = status
-            info.last_error = result.get("error", "")
-            # next_retry_at ya fue calculado por RetryPolicy
-            if info.status == VatStatus.PENDING_MAX:
-                self.log_error(f"{info.vat_clean} → NO VERIFICABLE (máx intentos)")
-            else:
-                attempts = info.attempts_hard
-                self.log_warn(f"{info.vat_clean} → {status_code(status)} ({attempts} intentos)")
-            self.root.after(0, self.refresh_trees)
+        elif status == VatStatus.TIMEOUT or status == VatStatus.ERROR:
+            # Solo logging (attempts_hard ya fue incrementado por core)
+            attempts = info.attempts_hard
+            retry_info = ""
+            if info.next_retry_at:
+                retry_info = f" | retry {info.next_retry_at.strftime('%H:%M:%S')}"
+            self.log_warn(f"{info.vat_clean} → {status_code(status)} ({attempts} intentos){retry_info}")
 
         elif status == VatStatus.PENDING_MAX:
-            info.status = VatStatus.PENDING_MAX
-            info.last_error = result.get("error", "")
+            # Estado terminal (ya asignado por RetryPolicy)
             self.log_error(f"{info.vat_clean} → NO VERIFICABLE (límite alcanzado)")
-            self.root.after(0, self.refresh_trees)
+
+        elif status == VatStatus.INVALID_FORMAT:
+            self.log_error(f"{info.vat_clean} → FORMATO INVÁLIDO")
 
         else:
-            # Unknown status: treat as error
-            info.status = VatStatus.ERROR
-            info.last_error = str(result.get("error", "Error desconocido"))
-            self.log_error(f"{info.vat_clean} → ERROR")
-            self.root.after(0, self.refresh_trees)
+            # Estado desconocido
+            self.log_error(f"{info.vat_clean} → {status_code(status)}")
+
+        # Refrescar UI (siempre)
+        self.root.after(0, self.refresh_trees)
 
     def _finish_validation(self, summary: Optional[BatchSummary] = None) -> None:
         """Finaliza validación y actualiza UI."""

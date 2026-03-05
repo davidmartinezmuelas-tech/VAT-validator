@@ -154,6 +154,7 @@ class RetryScheduler:
                     result = self.validator.validate_vat(info.country, info.number)
                     
                     # Process result - actualizar status y contadores
+                    prev_status = info.status  # Guardar para undo en UI
                     status = result.get("status")
                     info.status = status
                     
@@ -164,9 +165,17 @@ class RetryScheduler:
                     elif status in {VatStatus.TIMEOUT, VatStatus.ERROR}:
                         info.attempts_hard += 1
                         info.last_error = result.get("error", "")
+                    elif status == VatStatus.VALID:
+                        # Campos de negocio de respuesta VIES (core los actualiza)
+                        info.last_error = ""
+                    elif status == VatStatus.INVALID:
+                        info.last_error = ""
                     
                     # Aplicar política de retry (única fuente de verdad)
                     decision = self.retry_policy.apply_retry_decision(info)
+                    
+                    # Pasar prev_status a UI para undo stack
+                    result["_prev_status"] = prev_status
                     
                     # Procesar decisión
                     if status in {VatStatus.VALID, VatStatus.INVALID}:
