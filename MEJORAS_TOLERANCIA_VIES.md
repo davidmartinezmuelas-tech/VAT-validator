@@ -3,53 +3,106 @@
 ## 📋 Objetivo
 Reducir drásticamente estados ERROR/THROTTLED/NO VERIFICABLE al validar lotes en VIES, manteniendo compatibilidad hacia atrás.
 
+## 📋 Modos de Validación
+
+### 🚀 MODO RÁPIDO (DEFAULT)
+**Objetivo:** Terminar lotes rápido sin saturar VIES.
+- Timeouts cortos: 4s connection + 8s read = **12s total**
+- Baja concurrencia: 2 workers
+- Rate limit: 1.5 req/s
+- Reintentos mínimos: max 2 automáticos, deadline 30s
+- **FAST-FAIL en países caídos** (MS_UNAVAILABLE)
+
+### 🛡️ MODO ROBUSTO (optional)
+**Objetivo:** Máxima recuperación, tolera más fallos temporales.
+- Timeouts generosos: 8s connection + 15s read = **23s total**
+- Concurrencia: 2 workers
+- Rate limit: 2.0 req/s
+- Reintentos agresivos: max 5 automáticos, deadline 120s
+- Backoff máximo: 60s
+
+**Uso:** `from vat_validator.config import ROBUST_CONFIG; app.config = ROBUST_CONFIG`
+
+## 📡 Detección de Países Caídos (MS_UNAVAILABLE)
+
+En VIES, cuando un país está caído, el servicio retorna:
+- `MS_UNAVAILABLE` en el mensaje SOAP Fault
+- Variantes: "Member State service unavailable"
+
+**Implementación:**
+```python
+# vat_validator/vies_client.py
+if "MS_UNAVAILABLE" in error or "Member State service unavailable" in error:
+    return {"status": VatStatus.TIMEOUT, "error": "MS_UNAVAILABLE"}
+
+# vat_validator/retry_policy.py
+if error == "MS_UNAVAILABLE":
+    # FAST-FAIL: no reintenta más, marca como NO_VERIFICABLE inmediatamente
+    vat.status = VatStatus.PENDING_MAX
+    logger.warning(f"FAST-FAIL: {vat} - Member State unavailable")
+```
+
+**Logging diferenciado:**
+```
+⚠️  TIMEOUT normal:     "VAT ES12345678: TIMEOUT (SERVICE_UNAVAILABLE)"
+⚠️  MS_UNAVAILABLE:     "VAT ES12345678: TIMEOUT (MS_UNAVAILABLE - Member State unavailable)" → FAST-FAIL
+```
+
 ## ✅ Cambios Implementados
 
-### 1. **Configuración Centralizada** (`vat_validator/config.py` - NUEVO)
+### 1. **Configuración Centralizada** (`vat_validator/config.py`)
 
-Creada clase `ViesConfig` con parámetros optimizados:
+Creada clase `ViesConfig` con dos perfiles:
 
+**FAST_CONFIG (DEFAULT):**
 ```python
 @dataclass
 class ViesConfig:
-    # Timeouts de red (separados por tipo)
-    connection_timeout: float = 8.0    # ↑ Mejorado
-    read_timeout: float = 15.0         # ↑ Mejorado (total: 23s vs 10s anterior)
+    # Timeouts de red (CORTOS)
+    connection_timeout: float = 4.0    # Rápido, no espera mucho
+    read_timeout: float = 8.0          # Total: 12s
     
     # Control de concurrencia
-    max_workers: int = 2               # ↓ Reducido (3→2)
-    max_requests_per_second: float = 2.0  # 🆕 Rate limiter
-    throttle_ms: int = 500             # ↑ Aumentado (250→500ms)
+    max_workers: int = 2               # Baja concurrencia
+    max_requests_per_second: float = 1.5  # Rate limit bajo
+    throttle_ms: int = 300             # Separación mínima
     
-    # Política de reintentos mejorada
-    max_auto_retries: int = 5          # ↑ Aumentado (2→5)
-    max_hard_attempts: int = 6         # ↑ Aumentado (3→6)
-    deadline_seconds: int = 120        # ↑ Aumentado (25→120s)
+    # Reintentos MÍNIMOS
+    max_auto_retries: int = 2          # Solo lo justo
+    max_hard_attempts: int = 3         # Total bajo
+    deadline_seconds: int = 30         # Deadline corto
     
-    # Backoff exponencial
-    base_backoff_seconds: float = 2.0  # 2s, 4s, 8s, 16s, 32s, 60s...
-    max_backoff_seconds: float = 60.0  # Tope máximo
-    
-    # Jitter para throttling
-    throttle_jitter_min: float = 3.0   # ↑ Aumentado (2→3s)
-    throttle_jitter_max: float = 10.0  # ↑ Aumentado (7→10s)
-    
-    # Logging diagnóstico
-    verbose_logging: bool = True       # 🆕 Activado por defecto
+    # Backoff y jitter cortos
+    base_backoff_seconds: float = 2.0
+    max_backoff_seconds: float = 20.0  # Tope bajo
+    throttle_jitter_min: float = 1.0
+    throttle_jitter_max: float = 3.0
+```
+
+**ROBUST_CONFIG (opcional):**
+```python
+# Same structure, pero con valores GENEROSOS:
+connection_timeout: 8.0, read_timeout: 15.0, total: 23s
+max_auto_retries: 5, max_hard_attempts: 6
+deadline_seconds: 120
+max_backoff_seconds: 60.0
+throttle_jitter_max: 10.0
 ```
 
 ### 2. **ViesValidator** (`vat_validator/vies_client.py`)
 
-**Mejoras de timeouts:**
-- ✅ Timeouts configurables (antes: fijo 10s)
-- ✅ Separación entre `connection_timeout` y `read_timeout`
-- ✅ Total configurable: 8s + 15s = 23s (vs 10s anterior)
+**Detección de errores mejorada:**
+- ✅ `MS_UNAVAILABLE` → FAST-FAIL (país caído)
+- ✅ `MS_MAX_CONCURRENT_REQ` → THROTTLED (reintenta con jitter)
+- ✅ `SERVICE_UNAVAILABLE` → TIMEOUT (reintenta con backoff)
+- ✅ Timeouts configurables desde ViesConfig
 
-**Logging diagnóstico:**
+**Logging diferenciado:**
 ```python
 ✅ "VAT ES12345678: VALID"
-✅ "VAT FR98765432: THROTTLED (MS_MAX_CONCURRENT_REQ)"
-✅ "VAT DE11111111: TIMEOUT (conn=8.0s, read=15.0s)"
+⚠️  "VAT FR98765432: THROTTLED (MS_MAX_CONCURRENT_REQ)"
+⚠️  "VAT DE11111111: TIMEOUT (conn=4.0s, read=8.0s)"
+❌ "VAT IT12345678: TIMEOUT (MS_UNAVAILABLE - Member State unavailable)" → FAST-FAIL
 ```
 
 ### 3. **RetryScheduler** (`vat_validator/retry_logic.py`)

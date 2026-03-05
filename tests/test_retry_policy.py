@@ -288,3 +288,91 @@ class TestRetryPolicy:
 
         # Mismo seed → mismo resultado
         assert vat1.next_retry_at == vat2.next_retry_at
+
+    def test_fast_fail_member_state_unavailable(self):
+        """MS_UNAVAILABLE (Member State caído) => FAST-FAIL sin reintento."""
+        policy = RetryPolicy(max_auto_retries=5, max_hard_attempts=6)
+        now = datetime(2026, 3, 4, 12, 0, 0)
+
+        vat = VatInfo(
+            vat_clean="ESB12345678",
+            country="ES",
+            number="B12345678",
+            status=VatStatus.TIMEOUT,
+            last_error="MS_UNAVAILABLE",
+            auto_retry_count=0,
+            attempts_hard=1,
+            first_attempt_at=now,
+        )
+
+        decision = policy.apply_retry_decision(vat, now=now)
+
+        # No reintentar, marcar como PENDING_MAX
+        assert decision.should_retry is False
+        assert vat.status == VatStatus.PENDING_MAX
+        assert vat.next_retry_at is None
+        assert decision.reason == "member_state_unavailable"
+
+    def test_timeout_normal_respects_max_auto_retries(self):
+        """TIMEOUT NORMAL (no MS_UNAVAILABLE) respeta max_auto_retries."""
+        policy = RetryPolicy(max_auto_retries=2, max_hard_attempts=3, deadline_seconds=120, base_backoff_seconds=2)
+        now = datetime(2026, 3, 4, 12, 0, 0)
+
+        vat = VatInfo(
+            vat_clean="ESB12345678",
+            country="ES",
+            number="B12345678",
+            status=VatStatus.TIMEOUT,
+            last_error="TIMEOUT",  # NO es MS_UNAVAILABLE
+            auto_retry_count=0,
+            attempts_hard=1,
+            first_attempt_at=now,
+        )
+
+        # Primer reintento
+        decision1 = policy.apply_retry_decision(vat, now=now)
+        assert decision1.should_retry is True
+        assert vat.auto_retry_count == 1
+        
+        # Segundo reintento
+        vat.attempts_hard = 2
+        vat.auto_retry_count = 1  # Simular que ya hizo 1 reintento
+        decision2 = policy.apply_retry_decision(vat, now=now + timedelta(seconds=10))
+        assert decision2.should_retry is True
+        assert vat.auto_retry_count == 2
+        
+        # Tercero sería excedido
+        vat.auto_retry_count = 2
+        decision3 = policy.apply_retry_decision(vat, now=now + timedelta(seconds=20))
+        assert decision3.should_retry is False
+        assert vat.status == VatStatus.PENDING_MAX
+        assert "max_auto_retries" in decision3.reason
+
+    def test_throttled_respects_deadline(self):
+        """THROTTLED respeta deadline global."""
+        policy = RetryPolicy(deadline_seconds=30, max_auto_retries=5)
+        start = datetime(2026, 3, 4, 12, 0, 0)
+        
+        vat = VatInfo(
+            vat_clean="ESB12345678",
+            country="ES",
+            number="B12345678",
+            status=VatStatus.THROTTLED,
+            auto_retry_count=0,
+            throttles=0,
+            first_attempt_at=start,
+        )
+        
+        # Dentro del deadline
+        mid = start + timedelta(seconds=20)
+        decision = policy.apply_retry_decision(vat, now=mid)
+        assert decision.should_retry is True
+        
+        # Fuera del deadline
+        over = start + timedelta(seconds=40)
+        vat.status = VatStatus.THROTTLED
+        vat.auto_retry_count = 0
+        decision = policy.apply_retry_decision(vat, now=over)
+        assert decision.should_retry is False
+        assert vat.status == VatStatus.PENDING_MAX
+        assert "deadline_exceeded" in decision.reason

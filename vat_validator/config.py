@@ -1,6 +1,10 @@
 """Configuración centralizada para validación VIES.
 
 Parámetros ajustables para tolerancia a throttling, timeouts y concurrencia.
+
+MODOS DISPONIBLES:
+- FAST_CONFIG: Defecto. Termina rápido, no satura VIES, FAST-FAIL en países caídos.
+- ROBUST_CONFIG: Máxima recuperación, reintentos agresivos, tolerancia alta a fallos.
 """
 
 from dataclasses import dataclass
@@ -40,5 +44,39 @@ class ViesConfig:
     verbose_logging: bool = True  # Activar logging detallado
 
 
-# Instancia global (modificable antes de iniciar validación)
-DEFAULT_CONFIG = ViesConfig()
+# ===== MODO RÁPIDO (DEFAULT) =====
+FAST_CONFIG = ViesConfig(
+    connection_timeout=4.0,
+    read_timeout=8.0,
+    max_workers=2,
+    max_requests_per_second=1.5,
+    throttle_ms=300,
+    max_auto_retries=2,
+    max_hard_attempts=3,
+    deadline_seconds=30,
+    base_backoff_seconds=2.0,
+    max_backoff_seconds=20.0,
+    throttle_jitter_min=1.0,
+    throttle_jitter_max=3.0,
+    verbose_logging=True
+)
+
+# ===== MODO ROBUSTO =====
+ROBUST_CONFIG = ViesConfig(
+    connection_timeout=8.0,
+    read_timeout=15.0,
+    max_workers=2,
+    max_requests_per_second=2.0,
+    throttle_ms=500,
+    max_auto_retries=5,
+    max_hard_attempts=6,
+    deadline_seconds=120,
+    base_backoff_seconds=2.0,
+    max_backoff_seconds=60.0,
+    throttle_jitter_min=3.0,
+    throttle_jitter_max=10.0,
+    verbose_logging=True
+)
+
+# Instancia global por defecto (MODO RÁPIDO)
+DEFAULT_CONFIG = FAST_CONFIG

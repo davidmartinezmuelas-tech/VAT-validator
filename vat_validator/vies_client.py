@@ -85,14 +85,25 @@ class ViesValidator:
         except Fault as e:
             msg = str(getattr(e, "message", "")) or str(e)
             detail = str(getattr(e, "detail", ""))
+            
+            # MS_UNAVAILABLE: Estado miembro no disponible (FAST-FAIL)
+            if "MS_UNAVAILABLE" in msg or "MS_UNAVAILABLE" in detail or "Member State service unavailable" in msg:
+                if self.config.verbose_logging:
+                    logger.warning(f"VAT {country_code}{vat_number}: TIMEOUT (MS_UNAVAILABLE - Member State service unavailable)")
+                return {"status": VatStatus.TIMEOUT, "error": "MS_UNAVAILABLE"}
+            
+            # MS_MAX_CONCURRENT_REQ: Throttling normal
             if "MS_MAX_CONCURRENT_REQ" in msg or "MS_MAX_CONCURRENT_REQ" in detail:
                 if self.config.verbose_logging:
                     logger.warning(f"VAT {country_code}{vat_number}: THROTTLED (MS_MAX_CONCURRENT_REQ)")
                 return {"status": VatStatus.THROTTLED, "error": "MS_MAX_CONCURRENT_REQ"}
+            
+            # SERVICE_UNAVAILABLE: Timeout genérico
             if "SERVICE_UNAVAILABLE" in msg or "SERVICE_UNAVAILABLE" in detail:
                 if self.config.verbose_logging:
                     logger.warning(f"VAT {country_code}{vat_number}: TIMEOUT (SERVICE_UNAVAILABLE)")
                 return {"status": VatStatus.TIMEOUT, "error": "SERVICE_UNAVAILABLE"}
+            
             if self.config.verbose_logging:
                 logger.error(f"VAT {country_code}{vat_number}: SOAP Fault - {msg[:80]}")
             return {"status": VatStatus.ERROR, "error": f"SOAP Fault: {msg[:120]}"}

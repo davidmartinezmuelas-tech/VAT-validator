@@ -136,6 +136,16 @@ class RetryPolicy:
             vat_info.next_retry_at = None
             return RetryDecision(False, None, "terminal_status")
 
+        # FAST-FAIL: MS_UNAVAILABLE (estado miembro caído) => no reintentar
+        if vat_info.status == VatStatus.TIMEOUT and vat_info.last_error == "MS_UNAVAILABLE":
+            vat_info.status = VatStatus.PENDING_MAX
+            vat_info.next_retry_at = None
+            if self.config.verbose_logging:
+                logger.warning(
+                    f"VAT {vat_info.vat_clean}: NO VERIFICABLE (FAST-FAIL: Member State unavailable)"
+                )
+            return RetryDecision(False, None, "member_state_unavailable")
+
         # Solo reintentar estados temporales
         if vat_info.status not in {VatStatus.THROTTLED, VatStatus.TIMEOUT, VatStatus.ERROR}:
             vat_info.next_retry_at = None
