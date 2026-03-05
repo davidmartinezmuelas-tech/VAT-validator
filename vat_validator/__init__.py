@@ -22,8 +22,10 @@ from .validator import (
 )
 from .excel_handler import load_excel, save_excel, detect_vat_column
 from .retry_logic import RetryScheduler
+from .retry_policy import RetryPolicy
 from .logger import VatValidatorLogger, get_logger, init_logger
 from .callbacks import ValidationCallbacks, BatchSummary
+from .config import ViesConfig, DEFAULT_CONFIG
 
 __version__ = "2.0.0"
 __author__ = "David"
@@ -50,6 +52,7 @@ __all__ = [
     "detect_vat_column",
     # Scheduling
     "RetryScheduler",
+    "RetryPolicy",
     # Logging
     "VatValidatorLogger",
     "get_logger",
@@ -57,4 +60,7 @@ __all__ = [
     # Callbacks
     "ValidationCallbacks",
     "BatchSummary",
+    # Configuración
+    "ViesConfig",
+    "DEFAULT_CONFIG",
 ]

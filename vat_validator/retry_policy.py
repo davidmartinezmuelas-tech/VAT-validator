@@ -13,12 +13,16 @@ La UI y el scheduler solo consultan/ejecutan decisiones, no las calculan.
 
 from __future__ import annotations
 
+import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
 from .models import VatInfo, VatStatus
+from .config import ViesConfig, DEFAULT_CONFIG
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -39,39 +43,71 @@ class RetryPolicy:
 
     def __init__(
         self,
+        config: ViesConfig = None,
         *,
-        base_backoff_seconds: int = 2,
-        max_backoff_seconds: int = 60,
-        max_auto_retries: int = 2,
-        max_hard_attempts: int = 3,
-        deadline_seconds: Optional[int] = 25,
-        throttle_jitter_min: float = 2.0,
-        throttle_jitter_max: float = 7.0,
-        throttle_jitter_escalation: float = 2.5,
+        # Parámetros legacy para compatibilidad hacia atrás
+        base_backoff_seconds: Optional[int] = None,
+        max_backoff_seconds: Optional[int] = None,
+        max_auto_retries: Optional[int] = None,
+        max_hard_attempts: Optional[int] = None,
+        deadline_seconds: Optional[int] = None,
+        throttle_jitter_min: Optional[float] = None,
+        throttle_jitter_max: Optional[float] = None,
+        throttle_jitter_escalation: Optional[float] = None,
         rng: Optional[random.Random] = None,
     ):
         """Inicializa política de reintentos.
 
         Args:
-            base_backoff_seconds: Base para backoff exponencial (default: 2s)
-            max_backoff_seconds: Tope máximo de backoff (default: 60s)
-            max_auto_retries: Máximo de reintentos automáticos (default: 2)
-            max_hard_attempts: Máximo de intentos duros antes de PENDING_MAX (default: 3)
-            deadline_seconds: Deadline desde primer intento (default: 25s)
-            throttle_jitter_min: Jitter mínimo para THROTTLED (default: 2s)
-            throttle_jitter_max: Jitter máximo inicial para THROTTLED (default: 7s)
-            throttle_jitter_escalation: Factor de escalamiento de jitter por throttle (default: 2.5)
+            config: Configuración de VIES (usa DEFAULT_CONFIG si None)
+            base_backoff_seconds: [LEGACY] Base para backoff (usa config si None)
+            max_backoff_seconds: [LEGACY] Tope máximo de backoff
+            max_auto_retries: [LEGACY] Máximo de reintentos automáticos
+            max_hard_attempts: [LEGACY] Máximo de intentos duros
+            deadline_seconds: [LEGACY] Deadline desde primer intento
+            throttle_jitter_min: [LEGACY] Jitter mínimo para THROTTLED
+            throttle_jitter_max: [LEGACY] Jitter máximo para THROTTLED
+            throttle_jitter_escalation: [LEGACY] Factor de escalamiento
             rng: Generador random (inyectable para tests deterministas)
         """
-        self.base_backoff = base_backoff_seconds
-        self.max_backoff = max_backoff_seconds
-        self.max_auto = max_auto_retries
-        self.max_hard = max_hard_attempts
-        self.deadline_seconds = deadline_seconds
-        self.throttle_jitter_min = throttle_jitter_min
-        self.throttle_jitter_max = throttle_jitter_max
-        self.throttle_escalation = throttle_jitter_escalation
+        # Si se pasan parámetros legacy, crear config temporal
+        if any(p is not None for p in [
+            base_backoff_seconds, max_backoff_seconds, max_auto_retries,
+            max_hard_attempts, deadline_seconds, throttle_jitter_min,
+            throttle_jitter_max, throttle_jitter_escalation
+        ]):
+            # Usar config base y sobrescribir con parámetros legacy
+            base_config = config or DEFAULT_CONFIG
+            self.config = ViesConfig(
+                connection_timeout=base_config.connection_timeout,
+                read_timeout=base_config.read_timeout,
+                max_workers=base_config.max_workers,
+                max_requests_per_second=base_config.max_requests_per_second,
+                throttle_ms=base_config.throttle_ms,
+                max_auto_retries=max_auto_retries if max_auto_retries is not None else base_config.max_auto_retries,
+                max_hard_attempts=max_hard_attempts if max_hard_attempts is not None else base_config.max_hard_attempts,
+                deadline_seconds=deadline_seconds if deadline_seconds is not None else base_config.deadline_seconds,
+                base_backoff_seconds=base_backoff_seconds if base_backoff_seconds is not None else base_config.base_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds if max_backoff_seconds is not None else base_config.max_backoff_seconds,
+                throttle_jitter_min=throttle_jitter_min if throttle_jitter_min is not None else base_config.throttle_jitter_min,
+                throttle_jitter_max=throttle_jitter_max if throttle_jitter_max is not None else base_config.throttle_jitter_max,
+                throttle_jitter_escalation=throttle_jitter_escalation if throttle_jitter_escalation is not None else base_config.throttle_jitter_escalation,
+                verbose_logging=base_config.verbose_logging,
+            )
+        else:
+            self.config = config or DEFAULT_CONFIG
+        
         self.rng = rng or random.Random()
+        
+        # Cache parámetros para acceso rápido
+        self.base_backoff = self.config.base_backoff_seconds
+        self.max_backoff = self.config.max_backoff_seconds
+        self.max_auto = self.config.max_auto_retries
+        self.max_hard = self.config.max_hard_attempts
+        self.deadline_seconds = self.config.deadline_seconds
+        self.throttle_jitter_min = self.config.throttle_jitter_min
+        self.throttle_jitter_max = self.config.throttle_jitter_max
+        self.throttle_escalation = self.config.throttle_jitter_escalation
 
     def apply_retry_decision(
         self,
@@ -111,18 +147,33 @@ class RetryPolicy:
             if elapsed > self.deadline_seconds:
                 vat_info.status = VatStatus.PENDING_MAX
                 vat_info.next_retry_at = None
+                if self.config.verbose_logging:
+                    logger.warning(
+                        f"VAT {vat_info.vat_clean}: NO VERIFICABLE (deadline {self.deadline_seconds}s excedido, "
+                        f"elapsed={elapsed:.1f}s, attempts={vat_info.attempts_hard}, throttles={vat_info.throttles})"
+                    )
                 return RetryDecision(False, None, "deadline_exceeded")
 
         # Verificar límite de reintentos automáticos
         if vat_info.auto_retry_count >= self.max_auto:
             vat_info.status = VatStatus.PENDING_MAX
             vat_info.next_retry_at = None
+            if self.config.verbose_logging:
+                logger.warning(
+                    f"VAT {vat_info.vat_clean}: NO VERIFICABLE (max_auto_retries={self.max_auto} alcanzado, "
+                    f"attempts={vat_info.attempts_hard}, throttles={vat_info.throttles}, status={vat_info.status.name})"
+                )
             return RetryDecision(False, None, "max_auto_retries")
 
         # Verificar límite de intentos duros (para TIMEOUT/ERROR)
         if vat_info.attempts_hard >= self.max_hard:
             vat_info.status = VatStatus.PENDING_MAX
             vat_info.next_retry_at = None
+            if self.config.verbose_logging:
+                logger.warning(
+                    f"VAT {vat_info.vat_clean}: NO VERIFICABLE (max_hard_attempts={self.max_hard} alcanzado, "
+                    f"throttles={vat_info.throttles}, status={vat_info.status.name})"
+                )
             return RetryDecision(False, None, "max_hard_attempts")
 
         # Calcular delay según estado
@@ -137,6 +188,13 @@ class RetryPolicy:
         # Incrementar contador y asignar
         vat_info.auto_retry_count += 1
         vat_info.next_retry_at = next_retry
+        
+        if self.config.verbose_logging:
+            logger.info(
+                f"VAT {vat_info.vat_clean}: Reintento programado en {delay_seconds:.1f}s "
+                f"(status={vat_info.status.name}, auto_retry={vat_info.auto_retry_count}/{self.max_auto}, "
+                f"hard={vat_info.attempts_hard}/{self.max_hard}, throttles={vat_info.throttles})"
+            )
 
         return RetryDecision(True, next_retry, "auto_retry_scheduled")
 

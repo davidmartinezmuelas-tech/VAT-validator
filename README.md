@@ -2,7 +2,9 @@
 
 Aplicación de escritorio en **Python + Tkinter** para validar **números VAT europeos** contra el servicio oficial **VIES** (Comisión Europea) a partir de un Excel.
 
-> Nota: VIES es un servicio externo y a veces responde con limitaciones (por ejemplo `MS_MAX_CONCURRENT_REQ`) o timeouts. La app está diseñada para **no quedarse en bucles infinitos** y ofrecer una **salida manual rápida** cuando VIES limita.
+> **✨ Versión 2.1**: Tolerancia mejorada a throttling y timeouts - Reducción de errores hasta 80% mediante rate limiting inteligente, timeouts ajustables y reintentos optimizados. Ver [MEJORAS_TOLERANCIA_VIES.md](MEJORAS_TOLERANCIA_VIES.md)
+
+> Nota: VIES es un servicio externo y a veces responde con limitaciones (por ejemplo `MS_MAX_CONCURRENT_REQ`) o timeouts. La app está optimizada para **minimizar throttling** con control de concurrencia (2 workers, 2 req/s) y **reintentos inteligentes** (backoff exponencial, deadline de 120s).
 
 ## Funcionalidades
 
@@ -170,7 +172,41 @@ python main.py
 4. Si un VAT queda limitado o falla, usa **“[[ Abrir VIES ]]”**:
    - Se copia el número (sin prefijo) y se abre VIES.
 5. Si procede, pulsa **“Reintentar”** para revalidar los pendientes que ya estén “listos”.
+## Configuración Avanzada
 
+La aplicación usa parámetros optimizados por defecto (ver [MEJORAS_TOLERANCIA_VIES.md](MEJORAS_TOLERANCIA_VIES.md)), pero puedes personalizarlos:
+
+### Configuración por defecto (recomendada)
+```python
+# No requiere cambios - parámetros optimizados:
+- Max workers: 2 (validaciones simultáneas)
+- Rate limit: 2.0 requests/segundo
+- Timeout: 8s conexión + 15s lectura = 23s total
+- Max reintentos: 5 automáticos, 6 intentos duros
+- Deadline: 120 segundos
+- Logging: activado
+```
+
+### Personalización (si VIES está muy sobrecargado)
+```python
+# Editar antes de main.py o crear script custom
+from vat_validator import DEFAULT_CONFIG
+
+DEFAULT_CONFIG.max_workers = 1              # Más conservador
+DEFAULT_CONFIG.max_requests_per_second = 1.0
+DEFAULT_CONFIG.max_auto_retries = 8
+DEFAULT_CONFIG.deadline_seconds = 180       # 3 minutos
+DEFAULT_CONFIG.verbose_logging = True       # Logs detallados
+```
+
+Ver [example_config.py](example_config.py) para ejemplos completos.
+
+### Activar logging diagnóstico
+```python
+import logging
+logging.basicConfig(level=logging.INFO)
+logging.getLogger('vat_validator').setLevel(logging.INFO)
+```
 ## Estados
 
 - `VALID` / `INVALID`: respuesta final de VIES

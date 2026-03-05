@@ -73,7 +73,11 @@ class TestRetryPolicy:
 
     def test_max_backoff_respected(self):
         """Backoff no excede max_backoff_seconds."""
-        policy = RetryPolicy(base_backoff_seconds=2, max_backoff_seconds=10)
+        policy = RetryPolicy(
+            base_backoff_seconds=2,
+            max_backoff_seconds=10,
+            max_auto_retries=15  # Suficiente para verificar backoff sin alcanzar límite
+        )
         now = datetime(2026, 3, 4, 12, 0, 0)
 
         vat = VatInfo(

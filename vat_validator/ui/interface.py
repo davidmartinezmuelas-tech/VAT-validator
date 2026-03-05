@@ -188,58 +188,67 @@ class VATValidatorApp:
         style.configure("TNotebook.Tab", padding=(UIStyles.NOTEBOOK_TAB_PADDING_X, UIStyles.NOTEBOOK_TAB_PADDING_Y))
 
     def setup_ui(self) -> None:
-        """Construye la interfaz gráfica completa."""
-        # Root grid
+        """Construye la interfaz gráfica con layout grid de 5 filas.
+        
+        Estructura del root con grid:
+        - Row 0: Header (no weight)
+        - Row 1: Actions/Toolbar (no weight)
+        - Row 2: Table/Notebook (weight 3) - crece más
+        - Row 3: Log (weight 1) - crece menos
+        - Row 4: Bottom bar fijo (no weight)
+        """
+        # ==== ROOT CONFIGURATION (GRID) ====
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        self.root.rowconfigure(1, weight=0)
+        self.root.rowconfigure(0, weight=0)  # Header - fijo
+        self.root.rowconfigure(1, weight=0)  # Actions - fijo
+        self.root.rowconfigure(2, weight=3)  # Table - crece 3x
+        self.root.rowconfigure(3, weight=1)  # Log - crece 1x
+        self.root.rowconfigure(4, weight=0)  # Bottom - fijo
 
-        # Main container
-        main = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
-        main.grid(row=0, column=0, sticky="nsew", padx=UIStyles.MAIN_PADDING, pady=UIStyles.MAIN_PADDING)
-        main.columnconfigure(0, weight=1)
-        main.rowconfigure(2, weight=1)  # content
-        main.rowconfigure(3, weight=0)  # log
+        # ==== ROW 0: HEADER ====
+        frame_header = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
+        frame_header.grid(row=0, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=UIStyles.MAIN_PADDING)
+        frame_header.columnconfigure(0, weight=1)
 
-        # Header
-        header = tk.Frame(main, bg=UIStyles.HEADER_BG)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, UIStyles.CONTENT_PADDING_Y), padx=0)
+        header = tk.Frame(frame_header, bg=UIStyles.HEADER_BG)
+        header.pack(fill=tk.X, pady=(0, UIStyles.CONTENT_PADDING_Y))
         header.columnconfigure(0, weight=1)
 
         title = tk.Label(header, text="VIES VAT Validator", font=UIStyles.FONT_TITLE, bg=UIStyles.HEADER_BG, fg=UIStyles.TEXT_HEADER)
-        title.grid(row=0, column=0, sticky="w", padx=UIStyles.CONTENT_PADDING_X, pady=(UIStyles.BUTTON_PADY, 0))
+        title.pack(side=tk.TOP, fill=tk.X, padx=UIStyles.CONTENT_PADDING_X, pady=(UIStyles.BUTTON_PADY, 0), anchor="w")
+        
         subtitle = tk.Label(header, text="Validación masiva de números VAT europeos", font=UIStyles.FONT_SUBTITLE, bg=UIStyles.HEADER_BG, fg=UIStyles.TEXT_SUBTITLE)
-        subtitle.grid(row=1, column=0, sticky="w", padx=UIStyles.CONTENT_PADDING_X, pady=(2, UIStyles.BUTTON_PADY))
+        subtitle.pack(side=tk.TOP, fill=tk.X, padx=UIStyles.CONTENT_PADDING_X, pady=(2, UIStyles.BUTTON_PADY), anchor="w")
 
-        # Toolbar
-        toolbar = tk.Frame(main, bg=UIStyles.BG_MAIN)
-        toolbar.grid(row=1, column=0, sticky="ew", pady=(UIStyles.BUTTON_PADY, UIStyles.CARD_PADDING_Y), padx=UIStyles.CONTENT_PADDING_X)
-        toolbar.columnconfigure(4, weight=1)
+        # ==== ROW 1: TOOLBAR/ACTIONS ====
+        frame_actions = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
+        frame_actions.grid(row=1, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=(0, UIStyles.CARD_PADDING_Y))
+        frame_actions.columnconfigure(4, weight=1)
 
-        self.load_btn = ttk.Button(toolbar, text="Cargar Excel", bootstyle="primary", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.load_excel)
-        self.load_btn.grid(row=0, column=0, padx=(0, UIStyles.CARD_PADDING_Y))
+        self.load_btn = ttk.Button(frame_actions, text="Cargar Excel", bootstyle="primary", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.load_excel)
+        self.load_btn.pack(side=tk.LEFT, padx=(0, UIStyles.CARD_PADDING_Y))
 
-        self.validate_btn = ttk.Button(toolbar, text="Validar", bootstyle="primary", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.start_validation)
-        self.validate_btn.grid(row=0, column=1, padx=(0, UIStyles.CARD_PADDING_Y))
+        self.validate_btn = ttk.Button(frame_actions, text="Validar", bootstyle="primary", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.start_validation)
+        self.validate_btn.pack(side=tk.LEFT, padx=(0, UIStyles.CARD_PADDING_Y))
         self.validate_btn.state(["disabled"])
 
-        self.retry_btn = ttk.Button(toolbar, text="Reintentar", bootstyle="primary", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.retry_pending)
-        self.retry_btn.grid(row=0, column=2, padx=(0, UIStyles.CARD_PADDING_Y))
+        self.retry_btn = ttk.Button(frame_actions, text="Reintentar", bootstyle="primary", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.retry_pending)
+        self.retry_btn.pack(side=tk.LEFT, padx=(0, UIStyles.CARD_PADDING_Y))
         self.retry_btn.state(["disabled"])
         Tooltip(self.retry_btn, "Reintenta los pendientes que ya han cumplido el tiempo de espera.")
 
-        self.validate_selected_btn = ttk.Button(toolbar, text="Validar seleccionado", bootstyle="primary", padding=(14, 8), command=self.validate_selected)
-        self.validate_selected_btn.grid(row=0, column=3, padx=(0, 8))
+        self.validate_selected_btn = ttk.Button(frame_actions, text="Validar seleccionado", bootstyle="primary", padding=(14, 8), command=self.validate_selected)
+        self.validate_selected_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.validate_selected_btn.state(["disabled"])
         Tooltip(self.validate_selected_btn, "Valida únicamente el VAT seleccionado.")
 
-        self.undo_btn = ttk.Button(toolbar, text="Deshacer último", bootstyle="secondary-outline", padding=(10, 6), command=self.undo_last_validated)
-        self.undo_btn.grid(row=0, column=4, padx=(0, 8))
+        self.undo_btn = ttk.Button(frame_actions, text="Deshacer último", bootstyle="secondary-outline", padding=(10, 6), command=self.undo_last_validated)
+        self.undo_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.undo_btn.state(["disabled"])
 
         # Export menu button
-        self.export_menu_btn = ttk.Menubutton(toolbar, text="Exportar ▾", bootstyle="secondary-outline")
-        self.export_menu_btn.grid(row=0, column=5, sticky="e", padx=(0, 0))
+        self.export_menu_btn = ttk.Menubutton(frame_actions, text="Exportar ▾", bootstyle="secondary-outline")
+        self.export_menu_btn.pack(side=tk.RIGHT, padx=(0, 0))
         self.export_menu_btn.state(["disabled"])
         
         self.export_menu = tk.Menu(self.export_menu_btn, tearoff=0)
@@ -248,15 +257,15 @@ class VATValidatorApp:
         self.export_menu.add_command(label="Exportar pendientes", command=lambda: self.export_to_excel(scope="pending"))
         self.export_menu_btn["menu"] = self.export_menu
 
-        # Content area
-        content = tk.Frame(main, bg=UIStyles.BG_MAIN)
-        content.grid(row=2, column=0, sticky="nsew")
-        content.columnconfigure(0, weight=1)
-        content.rowconfigure(0, weight=1)
+        # ==== ROW 2: TABLE CONTENT ====
+        frame_table = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
+        frame_table.grid(row=2, column=0, sticky="nsew", padx=UIStyles.MAIN_PADDING, pady=(0, UIStyles.CARD_PADDING_Y))
+        frame_table.columnconfigure(0, weight=1)
+        frame_table.rowconfigure(0, weight=1)
 
         # Results card
-        results_card = tk.Frame(content, bg=UIStyles.CARD_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.CARD_BORDERWIDTH, highlightbackground=UIStyles.CARD_BORDER, highlightthickness=1)
-        results_card.grid(row=0, column=0, sticky="nsew", pady=(0, 12), padx=16)
+        results_card = tk.Frame(frame_table, bg=UIStyles.CARD_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.CARD_BORDERWIDTH, highlightbackground=UIStyles.CARD_BORDER, highlightthickness=1)
+        results_card.pack(fill=tk.BOTH, expand=True)
         results_card.columnconfigure(0, weight=1)
         results_card.rowconfigure(2, weight=1)
         
@@ -298,16 +307,16 @@ class VATValidatorApp:
         self.notebook.add(validated_frame, text="Validados")
         self._build_tree_frame(validated_frame, kind="validated")
 
-        # Log frame
-        log_frame = tk.Frame(main, bg=UIStyles.BG_MAIN)
-        log_frame.grid(row=3, column=0, sticky="nsew", pady=(UIStyles.CONTENT_PADDING_Y, 0))
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
+        # ==== ROW 3: LOG SECTION ====
+        frame_log = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
+        frame_log.grid(row=3, column=0, sticky="nsew", padx=UIStyles.MAIN_PADDING, pady=(0, UIStyles.CARD_PADDING_Y))
+        frame_log.columnconfigure(0, weight=1)
+        frame_log.rowconfigure(1, weight=1)
 
-        tk.Label(log_frame, text="Actividad", font=UIStyles.FONT_LABEL, bg=UIStyles.BG_MAIN, fg=UIStyles.TEXT_PRIMARY, anchor="w").pack(side=tk.TOP, fill=tk.X, padx=8)
+        tk.Label(frame_log, text="Actividad", font=UIStyles.FONT_LABEL, bg=UIStyles.BG_MAIN, fg=UIStyles.TEXT_PRIMARY, anchor="w").grid(row=0, column=0, sticky="ew", padx=8, pady=(0, 4))
 
-        log_text_frame = tk.Frame(log_frame, bg=UIStyles.CARD_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.CARD_BORDERWIDTH)
-        log_text_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(4, 0))
+        log_text_frame = tk.Frame(frame_log, bg=UIStyles.CARD_BG, relief=UIStyles.CARD_RELIEF, borderwidth=UIStyles.CARD_BORDERWIDTH)
+        log_text_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 4))
         log_text_frame.columnconfigure(0, weight=1)
         log_text_frame.rowconfigure(0, weight=1)
 
@@ -328,19 +337,31 @@ class VATValidatorApp:
         self.log_text.tag_config("DEBUG", foreground=UIStyles.LOG_DEBUG)
 
         # Log controls
-        log_control_frame = tk.Frame(log_frame, bg=UIStyles.BG_MAIN)
-        log_control_frame.pack(side=tk.TOP, fill=tk.X, padx=8, pady=(4, 0))
+        log_control_frame = tk.Frame(frame_log, bg=UIStyles.BG_MAIN)
+        log_control_frame.grid(row=2, column=0, sticky="ew", padx=8)
 
         ttk.Button(log_control_frame, text="Limpiar registro", bootstyle="secondary-outline", padding=(8, 4), command=self.clear_log).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(log_control_frame, text="Copiar registro", bootstyle="secondary-outline", padding=(8, 4), command=self.copy_log).pack(side=tk.LEFT)
 
-        # Status bar
-        status_frame = tk.Frame(self.root, bg=UIStyles.BG_MAIN)
-        status_frame.grid(row=1, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=(UIStyles.MAIN_PADDING, 0))
-        status_frame.columnconfigure(0, weight=1)
+        # ==== ROW 4: FIXED BOTTOM BAR ====
+        frame_bottom = ttk.Frame(self.root)
+        frame_bottom.grid(row=4, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=(UIStyles.CARD_PADDING_Y, UIStyles.MAIN_PADDING))
+        frame_bottom.grid_columnconfigure(0, weight=1)
+        frame_bottom.grid_columnconfigure(1, weight=0)
 
-        self.status_label = tk.Label(status_frame, textvariable=self.status_var, font=UIStyles.FONT_STATUS, bg=UIStyles.BG_MAIN, fg=UIStyles.TEXT_PRIMARY, anchor="w")
-        self.status_label.pack(side=tk.LEFT, fill=tk.X)
+        # Progress bar (column 0, expandible)
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(frame_bottom, variable=self.progress_var, mode="determinate", maximum=100, bootstyle="info")
+        self.progress_bar.grid(row=0, column=0, sticky="ew", padx=(0, UIStyles.CARD_PADDING_Y))
+
+        # Exit button (column 1, fijo a la derecha)
+        self.exit_btn = ttk.Button(frame_bottom, text="Salir", bootstyle="danger-outline", padding=(UIStyles.BUTTON_PADX, UIStyles.BUTTON_PADY), command=self.exit_app)
+        self.exit_btn.grid(row=0, column=1, sticky="e")
+
+        # ==== STATUS LABEL ====
+        self.status_label = tk.Label(self.root, textvariable=self.status_var, font=UIStyles.FONT_STATUS, bg=UIStyles.BG_MAIN, fg=UIStyles.TEXT_PRIMARY, anchor="w")
+        self.status_label.grid(row=5, column=0, sticky="ew", padx=UIStyles.MAIN_PADDING, pady=(0, 2))
+        self.root.rowconfigure(5, weight=0)
 
     def _build_tree_frame(self, parent: ttk.Frame, kind: str) -> None:
         """Construye un frame con búsqueda y tabla de VATs."""
@@ -791,6 +812,9 @@ class VATValidatorApp:
         self.validate_btn.state(["disabled"])
         self.retry_btn.state(["disabled"])
         self.validate_selected_btn.state(["disabled"])
+        
+        # Resetear barra de progreso
+        self.progress_var.set(0)
 
         self.log_info("============================================================")
         self.log_info(f"Iniciando validación de {len(to_validate)} VATs...")
@@ -832,6 +856,7 @@ class VATValidatorApp:
 
         self.log_info("============================================================")
         self.log_info(f"Reintentando {len(to_retry)} VATs pendientes...")
+        self.progress_var.set(0)
 
         t = threading.Thread(target=self._validate_batch_worker, args=(to_retry,), daemon=True)
         self._worker_threads = [t]
@@ -858,6 +883,7 @@ class VATValidatorApp:
         self.validate_selected_btn.state(["disabled"])
 
         self.log_info(f"Validando seleccionado: {info.vat_clean}")
+        self.progress_var.set(0)
 
         t = threading.Thread(target=self._validate_batch_worker, args=([(key, info)],), daemon=True)
         self._worker_threads = [t]
@@ -878,6 +904,10 @@ class VATValidatorApp:
     def _on_progress_main_thread(self, done: int, total: int) -> None:
         """Callback: Actualizar progreso."""
         self.set_status(f"Validando… {done}/{total}", 0)
+        # Actualizar barra de progreso
+        if total > 0:
+            progress = (done / total) * 100
+            self.progress_var.set(progress)
 
     def _on_banner_update_main_thread(self, text: str, next_retry_seconds: Optional[int] = None) -> None:
         """Callback: Actualizar banner."""
